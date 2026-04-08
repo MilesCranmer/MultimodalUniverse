@@ -1,6 +1,6 @@
 # MMU v2 HATS — Port Status
 
-Live tracker for the raw → HATS port of v1 MMU. Every non-skipped dataset in `mmu/hats_configs.py` gets a `scripts/<dataset>/build_parent_sample_hats.py` that preserves the v1 scientific content and field semantics, while allowing backend-specific HATS storage when the old HDF5 layout is a bad fit (for example MaNGA's native-size IFU payloads).
+Live tracker for the raw → HATS port of v1 MMU. Every non-skipped dataset in `mmu/hats_configs.py` gets a `scripts/<dataset>/build_parent_sample_hats.py` that matches v1's HuggingFace `Features(...)` schema 1:1, with HATS output instead of HDF5.
 
 **Test slice:** COSMOS field — RA=150°, Dec=+2°, radius=0.5° (1° cone). Every build script accepts `--ra-center/--dec-center/--radius` to run the test slice in seconds instead of the hours a full build takes. The `cosmos` Snakemake profile sets these automatically.
 
@@ -81,13 +81,12 @@ Live tracker for the raw → HATS port of v1 MMU. Every non-skipped dataset in `
   - [ ] COSMOS cluster validation
 - [skip] **kepler** — raw Kepler FITS not on cluster mirror (only v1 HDF5 exists)
   - Moved to skip list; requires raw MAST data mirror before port is possible
-- [~] **manga** — BUNDLED, MOST COMPLEX: IFU cubes + spaxel coords + griz reconstructions
-  - [x] Raw layout inspection
-  - [x] v1 schema review
-  - [x] `build_parent_sample_hats.py`
-  - [x] Unit tests + local smoke
-  - [ ] Raw sample parity against v1 HDF5 reference rows
-  - [ ] Cluster-scale validation / benchmark
+- [ ] **manga** — BUNDLED, MOST COMPLEX: IFU cubes + spaxel coords + griz reconstructions
+  - [ ] Raw layout inspection
+  - [ ] v1 schema review
+  - [ ] `build_parent_sample_hats.py`
+  - [ ] Unit tests + local smoke
+  - [ ] COSMOS cluster validation
 
 ## Phase 2 — Remaining datasets
 

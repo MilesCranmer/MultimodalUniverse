@@ -18,7 +18,7 @@ from cdshealpix import lonlat_to_healpix
 
 from mmu.cone import apply_cone_filter
 from mmu.hats_configs import DATASETS, MMU_V2_HATS_ROOT
-from mmu.hats_import import write_hats_from_parquet
+from mmu.hats_import import write_hats_from_parquet_dir
 
 
 CATALOG_NAME = "manga"
@@ -537,8 +537,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         print(f"\nBuilt {len(parquet_files)} parquet shard(s) for {processed} MaNGA targets")
-        catalog_dir = write_hats_from_parquet(
-            parquet_files,
+        catalog_dir = write_hats_from_parquet_dir(
+            work_dir,
             output_path=args.output_root,
             catalog_name=CATALOG_NAME,
             pixel_threshold=args.pixel_threshold,
