@@ -115,14 +115,15 @@ def _read_optional_map_data(
     return np.full(shape, fill_value, dtype=np.float32)
 
 
-def process_cube(summary_row, raw_root: str) -> dict | None:
+def process_cube(summary_row, raw_root: str) -> dict:
     """Read one plate-IFU into a row."""
     plateifu = _b2s(summary_row["plateifu"])
     cube_file = cube_path(raw_root, plateifu)
     map_file = maps_path(raw_root, plateifu)
 
     if not os.path.exists(cube_file) or not os.path.exists(map_file):
-        return None
+        missing = cube_file if not os.path.exists(cube_file) else map_file
+        raise FileNotFoundError(missing)
 
     with fits.open(cube_file) as cube:
         flux = _move_spectral_axis_last(cube["FLUX"].data, np.float32)
@@ -429,15 +430,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for i, row in enumerate(catalog, 1):
             plateifu = _b2s(row["plateifu"])
-            try:
-                record = process_cube(row, args.raw_root)
-            except (FileNotFoundError, OSError, KeyError, ValueError) as exc:
-                print(f"  [{i}/{len(catalog)}] {plateifu}: {type(exc).__name__}: {exc}", file=sys.stderr)
-                continue
-
-            if record is None:
-                print(f"  [{i}/{len(catalog)}] {plateifu}: missing cube or map file", file=sys.stderr)
-                continue
+            record = process_cube(row, args.raw_root)
 
             chunk.append(record)
             processed += 1
