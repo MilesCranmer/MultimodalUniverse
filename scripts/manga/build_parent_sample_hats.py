@@ -1,541 +1,581 @@
 """Convert raw SDSS-IV MaNGA into a HATS catalog.
 
-Matches v1 MMU's ``scripts/manga/build_parent_sample.py`` exactly, with
-HATS output instead of HDF5:
+This builder keeps the existing MMU MaNGA science content and field names, but
+uses a HATS-native physical encoding:
 
-    1. Read drpall-v3_1_1.fits and dapall-v3_1_1-3.1.0.fits, inner-join on
-       plateifu, keep only DAPDONE rows.
-    2. (If a cone cut is active) trim the joined catalog by ifura/ifudec.
-    3. For each surviving plate-ifu:
-         - Open ``redux/v3_1_1/{plate}/stack/manga-{plateifu}-LOGCUBE.fits.gz``
-           and extract flux/ivar/mask/lsf/wave + griz reconstructed images
-           and PSFs. Pad spatial dims to 96×96.
-         - Open ``analysis/v3_1_1/3.1.0/HYB10-MILESHC-MASTARSSP/{plate}/{ifu}/
-           manga-{plateifu}-MAPS-HYB10-MILESHC-MASTARSSP.fits.gz`` for the DAP
-           analysis maps + spaxel coordinate grids. Pad to 96×96.
-    4. Build a per-row dict matching v1's HuggingFace `Features(...)`:
+1. Read ``drpall`` + ``dapall``, inner-join on ``plateifu``, and keep only
+   ``DAPDONE`` rows.
+2. For each surviving target, open the raw DRP ``LOGCUBE`` and DAP ``MAPS``
+   FITS files directly.
+3. Preserve the native MaNGA spatial footprint instead of padding everything to
+   the v1 ``96x96`` canvas. Spaxel spectra are stored as ``(y, x, lambda)``
+   cubes, reconstructed images as ``(band, y, x)``, and DAP maps as
+   ``(map, y, x)``.
+4. Write small parquet shards incrementally, then feed those shards through the
+   shared ``hats-import`` pipeline.
 
-           spaxels: struct<flux, ivar, mask, lsf, lambda, x, y, spaxel_idx,
-                            *_units, skycoo_x/y, ellcoo_r/rre/rkpc/theta, *_units>
-           images:  struct<filter, flux, flux_units, psf, psf_units, scale, scale_units>
-           maps:    struct<group, label, flux, ivar, mask, array_units>
-           ra, dec, object_id (= plateifu), z, spaxel_size, spaxel_size_units
-
-       All arrays stored as plain nested lists (no extension types) — see
-       ``project_image_storage`` memory.
-    5. Write HATS via ``mmu.hats_import.write_hats``.
-
-Cluster layout::
-
-    /mnt/ceph/users/polymathic/external_data/astro/manga/
-        drpall-v3_1_1.fits                                  # plate-ifu summary catalog
-        dapall-v3_1_1-3.1.0.fits                            # DAP done flag, etc.
-        dr17/manga/spectro/redux/v3_1_1/{plate}/stack/manga-{plateifu}-LOGCUBE.fits.gz
-        dr17/manga/spectro/analysis/v3_1_1/3.1.0/HYB10-MILESHC-MASTARSSP/{plate}/{ifu}/
-            manga-{plateifu}-MAPS-HYB10-MILESHC-MASTARSSP.fits.gz
+The output intentionally keeps MMU's logical fields (``spaxels``, ``images``,
+``maps``, ``object_id``, ``ra``, ``dec``, ``z``, etc.) while changing the
+backend representation for storage and memory efficiency. A v1 compatibility
+adapter lives in the validation tooling, not in the on-disk HATS schema.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.parquet as pq
+from astropy import units as u
 from astropy.io import fits
 from astropy.table import Table, join
+from cdshealpix import lonlat_to_healpix
 
 from mmu.cone import apply_cone_filter
 from mmu.hats_configs import DATASETS, MMU_V2_HATS_ROOT
-from mmu.hats_import import np_to_pyarrow_list, write_hats
+from mmu.hats_import import write_hats_from_parquet
 
 
 CATALOG_NAME = "manga"
-
-IMAGE_SIZE = 96
-SPECTRUM_SIZE = 4563
-N_BANDS = 4
-BANDS = ["g", "r", "i", "z"]
-SPAXEL_SIZE_ARCSEC = 0.5
 DAPTYPE = "HYB10-MILESHC-MASTARSSP"
+SPAXEL_SIZE_ARCSEC = 0.5
+V1_IMAGE_SIZE = 96
+SPECTRUM_SIZE = 4563
+HEALPIX_NSIDE = 16
+HEALPIX_DEPTH = 4
+MAP_MASK_FILL_VALUE = 1073741824.0
+BANDS = ["g", "r", "i", "z"]
 
 
 def _b2s(v) -> str:
     return v.decode().strip() if isinstance(v, (bytes, np.bytes_)) else str(v).strip()
 
 
-def load_catalog(raw_root: str) -> Table:
+def _to_native(array: np.ndarray, dtype=None) -> np.ndarray:
+    """Return ``array`` with native byte order and the requested dtype."""
+    arr = np.asarray(array, dtype=dtype)
+    if arr.dtype.byteorder in ("=", "|"):
+        return arr
+    return arr.byteswap().view(arr.dtype.newbyteorder("="))
+
+
+def _normalize_channel_name(value: str) -> str:
+    return value.replace("-", "_").strip().replace(". ", "").replace(" ", "_")
+
+
+def _header_indexed_value(header, prefix: str, index: int, default="") -> str:
+    """Return a FITS header card value for both ``U1``/``U01``-style conventions."""
+    return header.get(f"{prefix}{index:02}", header.get(f"{prefix}{index}", default))
+
+
+def _require_spatial_shape(name: str, array: np.ndarray, expected_shape: tuple[int, int]) -> None:
+    if array.shape[-2:] != expected_shape:
+        raise ValueError(
+            f"{name} has spatial shape {array.shape[-2:]}, expected {expected_shape}"
+        )
+
+
+def _move_spectral_axis_last(array: np.ndarray, dtype) -> np.ndarray:
+    """Convert raw FITS ``(lambda, y, x)`` arrays to ``(y, x, lambda)``."""
+    array = _to_native(array, dtype=dtype)
+    return np.moveaxis(array, 0, -1)
+
+
+def load_catalog(
+    raw_root: str,
+    *,
+    drpall_path: str | None = None,
+    dapall_path: str | None = None,
+) -> Table:
     """Read drpall + dapall and inner-join on plate-ifu, keeping DAPDONE rows."""
-    drpall = Table.read(os.path.join(raw_root, "drpall-v3_1_1.fits"), hdu="MANGA")
-    dapall = Table.read(
-        os.path.join(raw_root, "dapall-v3_1_1-3.1.0.fits"),
-        hdu=DAPTYPE,
-    )
+    drpall_file = drpall_path or os.path.join(raw_root, "drpall-v3_1_1.fits")
+    dapall_file = dapall_path or os.path.join(raw_root, "dapall-v3_1_1-3.1.0.fits")
+
+    drpall = Table.read(drpall_file, hdu="MANGA")
+    dapall = Table.read(dapall_file, hdu=DAPTYPE)
     catalog = join(
-        drpall, dapall,
-        keys_left="plateifu", keys_right="PLATEIFU", join_type="inner",
+        drpall,
+        dapall,
+        keys_left="plateifu",
+        keys_right="PLATEIFU",
+        join_type="inner",
     )
-    catalog = catalog[np.asarray(catalog["DAPDONE"]).astype(bool)]
-    return catalog
+    return catalog[np.asarray(catalog["DAPDONE"]).astype(bool)]
 
 
 def cube_path(raw_root: str, plateifu: str) -> str:
     plate, _ = plateifu.split("-")
     return os.path.join(
-        raw_root, "dr17", "manga", "spectro", "redux", "v3_1_1",
-        plate, "stack", f"manga-{plateifu}-LOGCUBE.fits.gz",
+        raw_root,
+        "dr17",
+        "manga",
+        "spectro",
+        "redux",
+        "v3_1_1",
+        plate,
+        "stack",
+        f"manga-{plateifu}-LOGCUBE.fits.gz",
     )
 
 
 def maps_path(raw_root: str, plateifu: str) -> str:
     plate, ifu = plateifu.split("-")
     return os.path.join(
-        raw_root, "dr17", "manga", "spectro", "analysis", "v3_1_1", "3.1.0",
-        DAPTYPE, plate, ifu,
+        raw_root,
+        "dr17",
+        "manga",
+        "spectro",
+        "analysis",
+        "v3_1_1",
+        "3.1.0",
+        DAPTYPE,
+        plate,
+        ifu,
         f"manga-{plateifu}-MAPS-{DAPTYPE}.fits.gz",
     )
 
 
-def _pad_spatial(arr: np.ndarray) -> np.ndarray:
-    """Pad the LAST two axes of ``arr`` symmetrically up to ``IMAGE_SIZE``."""
-    *_, ny, nx = arr.shape
-    pad_y = (IMAGE_SIZE - ny) // 2
-    pad_x = (IMAGE_SIZE - nx) // 2
-    if pad_y == 0 and pad_x == 0:
-        return arr
-    pads = [(0, 0)] * (arr.ndim - 2) + [
-        (pad_y, IMAGE_SIZE - ny - pad_y),
-        (pad_x, IMAGE_SIZE - nx - pad_x),
-    ]
-    return np.pad(arr, pads)
+def _read_optional_map_data(
+    mapf: fits.HDUList,
+    ext_name: str | None,
+    shape: tuple[int, ...],
+    *,
+    fill_value: float,
+) -> np.ndarray:
+    if ext_name and ext_name in mapf:
+        return _to_native(np.asarray(mapf[ext_name].data), dtype=np.float32)
+    return np.full(shape, fill_value, dtype=np.float32)
 
 
-def _to_native(arr: np.ndarray) -> np.ndarray:
-    """Make the buffer little-endian native so PyArrow accepts it."""
-    if arr.dtype.byteorder == ">":
-        return arr.byteswap().view(arr.dtype.newbyteorder("<"))
-    return arr
+def process_cube(summary_row, raw_root: str) -> dict | None:
+    """Read one MaNGA plate-ifu (LOGCUBE + DAP MAPS) into one native-shape row."""
+    plateifu = _b2s(summary_row["plateifu"])
+    cube_file = cube_path(raw_root, plateifu)
+    map_file = maps_path(raw_root, plateifu)
 
-
-def process_cube(
-    plateifu: str,
-    cube_file: str,
-    map_file: str,
-) -> dict | None:
-    """Read one MaNGA plate-ifu (LOGCUBE + DAP MAPS) into a per-row dict.
-
-    Returns ``None`` if either input file is missing.
-    """
-    if not os.path.exists(cube_file):
-        return None
-    if not os.path.exists(map_file):
+    if not os.path.exists(cube_file) or not os.path.exists(map_file):
         return None
 
     with fits.open(cube_file) as cube:
-        flux = _to_native(np.asarray(cube["FLUX"].data, dtype=np.float32))
-        ivar = _to_native(np.asarray(cube["IVAR"].data, dtype=np.float32))
-        mask = _to_native(np.asarray(cube["MASK"].data, dtype=np.int64))
-        lsf = _to_native(np.asarray(cube["LSFPOST"].data, dtype=np.float32))
-        wave = _to_native(np.asarray(cube["WAVE"].data, dtype=np.float32))
-        flux_units = cube["FLUX"].header.get("BUNIT", "")
-        lambda_units = cube["FLUX"].header.get("CUNIT3", "")
+        flux = _move_spectral_axis_last(cube["FLUX"].data, np.float32)
+        ivar = _move_spectral_axis_last(cube["IVAR"].data, np.float32)
+        mask = _move_spectral_axis_last(cube["MASK"].data, np.int64)
+        lsf = _move_spectral_axis_last(cube["LSFPOST"].data, np.float32)
+        wave = _to_native(np.asarray(cube["WAVE"].data), dtype=np.float32)
 
-        # Pad spatial axes (last two) to IMAGE_SIZE; mask gets DONOTUSE pad value.
-        flux = _pad_spatial(flux)
-        ivar = _pad_spatial(ivar)
-        mask = np.pad(
-            mask,
-            [(0, 0)] + [
-                ((IMAGE_SIZE - mask.shape[1]) // 2, IMAGE_SIZE - mask.shape[1] - (IMAGE_SIZE - mask.shape[1]) // 2),
-                ((IMAGE_SIZE - mask.shape[2]) // 2, IMAGE_SIZE - mask.shape[2] - (IMAGE_SIZE - mask.shape[2]) // 2),
-            ],
-            constant_values=1024,
+        ny, nx, nwave = flux.shape
+        if nwave != len(wave):
+            raise ValueError(f"{plateifu}: FLUX spectral axis {nwave} != WAVE length {len(wave)}")
+
+        flux_units = _b2s(cube["FLUX"].header.get("BUNIT", ""))
+        lambda_units = _b2s(cube["FLUX"].header.get("CUNIT3", ""))
+
+        yy, xx = np.indices((ny, nx))
+        x_arr = xx.astype(np.int8)
+        y_arr = yy.astype(np.int8)
+        spaxel_idx = np.arange(ny * nx, dtype=np.int16).reshape(ny, nx)
+
+        image_flux = np.stack(
+            [_to_native(np.asarray(cube[f"{band.upper()}IMG"].data), dtype=np.float32) for band in BANDS],
+            axis=0,
         )
-        lsf = _pad_spatial(lsf)
+        image_psf = np.stack(
+            [_to_native(np.asarray(cube[f"{band.upper()}PSF"].data), dtype=np.float32) for band in BANDS],
+            axis=0,
+        )
+        _require_spatial_shape(f"{plateifu} image_flux", image_flux, (ny, nx))
+        _require_spatial_shape(f"{plateifu} image_psf", image_psf, (ny, nx))
 
-        nwave = flux.shape[0]
-        nspaxels = IMAGE_SIZE * IMAGE_SIZE  # 9216
-
-        # Reshape per-spaxel spectra to (nspaxels, nwave) — one row per spaxel.
-        flux_2d = flux.reshape(nwave, nspaxels).T  # (nspaxels, nwave)
-        ivar_2d = ivar.reshape(nwave, nspaxels).T
-        mask_2d = mask.reshape(nwave, nspaxels).T
-        lsf_2d = lsf.reshape(nwave, nspaxels).T
-        # Wavelength is shared by all spaxels but v1 stores it per-spaxel; we
-        # repeat to keep per-spaxel symmetry.
-        lam_2d = np.tile(wave[None, :], (nspaxels, 1))
-
-        # Spaxel x/y indices and unique idx.
-        yy, xx = np.indices((IMAGE_SIZE, IMAGE_SIZE))
-        x_arr = xx.reshape(nspaxels).astype(np.int8)
-        y_arr = yy.reshape(nspaxels).astype(np.int8)
-        spaxel_idx = np.arange(nspaxels, dtype=np.int16)
-
-        # Reconstructed griz images and PSFs.
-        img_stack = np.stack([
-            _pad_spatial(_to_native(np.asarray(cube[f"{b.upper()}IMG"].data, dtype=np.float32)))
-            for b in BANDS
-        ])
-        psf_stack = np.stack([
-            _pad_spatial(_to_native(np.asarray(cube[f"{b.upper()}PSF"].data, dtype=np.float32)))
-            for b in BANDS
-        ])
-
-    # DAP MAPS file: spaxel coordinate grids + analysis maps.
     with fits.open(map_file) as mapf:
-        skycoo = _to_native(np.asarray(mapf["SPX_SKYCOO"].data, dtype=np.float32))
-        skycoo = _pad_spatial(skycoo)  # shape (2, 96, 96)
-        skycoo_units = mapf["SPX_SKYCOO"].header.get("BUNIT", "")
+        skycoo = _to_native(np.asarray(mapf["SPX_SKYCOO"].data), dtype=np.float32)
+        ellcoo = _to_native(np.asarray(mapf["SPX_ELLCOO"].data), dtype=np.float32)
+        _require_spatial_shape(f"{plateifu} SPX_SKYCOO", skycoo, (ny, nx))
+        _require_spatial_shape(f"{plateifu} SPX_ELLCOO", ellcoo, (ny, nx))
 
-        ellcoo = _to_native(np.asarray(mapf["SPX_ELLCOO"].data, dtype=np.float32))
-        ellcoo = _pad_spatial(ellcoo)  # shape (4, 96, 96): r, r/re, r_kpc, theta
+        skycoo_units = _b2s(mapf["SPX_SKYCOO"].header.get("BUNIT", ""))
         ellcoo_units = [
-            mapf["SPX_ELLCOO"].header.get(f"U{i}", "")
+            _b2s(_header_indexed_value(mapf["SPX_ELLCOO"].header, "U", i, ""))
             for i in range(1, 5)
         ]
 
-        # Walk every non-PRIMARY, non-IVAR/MASK extension as a "map".
         maps_data: list[dict] = []
         for ext in mapf:
-            if ext.name == "PRIMARY":
+            if ext.name == "PRIMARY" or ext.name.endswith(("IVAR", "MASK")):
                 continue
-            if ext.name.endswith(("IVAR", "MASK")):
+            if ext.data is None:
                 continue
-            arr = ext.data
-            if arr is None:
-                continue
-            arr = _to_native(np.asarray(arr, dtype=np.float32))
-            arr = _pad_spatial(arr)
-            errdata = ext.header.get("ERRDATA")
-            qualdata = ext.header.get("QUALDATA")
-            if errdata and errdata in mapf:
-                err = _to_native(np.asarray(mapf[errdata].data, dtype=np.float32))
-                err = _pad_spatial(err)
-            else:
-                err = np.zeros_like(arr)
-            if qualdata and qualdata in mapf:
-                qual = _to_native(np.asarray(mapf[qualdata].data, dtype=np.float32))
-                qual = _pad_spatial(qual)
-            else:
-                qual = np.full_like(arr, 1073741824.0)
-            unit = ext.header.get("BUNIT", "")
+
+            array = _to_native(np.asarray(ext.data), dtype=np.float32)
+            _require_spatial_shape(f"{plateifu} {ext.name}", array, (ny, nx))
+
+            err = _read_optional_map_data(
+                mapf,
+                ext.header.get("ERRDATA"),
+                array.shape,
+                fill_value=0.0,
+            )
+            qual = _read_optional_map_data(
+                mapf,
+                ext.header.get("QUALDATA"),
+                array.shape,
+                fill_value=MAP_MASK_FILL_VALUE,
+            )
+            _require_spatial_shape(f"{plateifu} {ext.name} ERRDATA", err, (ny, nx))
+            _require_spatial_shape(f"{plateifu} {ext.name} QUALDATA", qual, (ny, nx))
+
+            unit = _b2s(ext.header.get("BUNIT", ""))
             base_name = ext.name.lower()
-            if arr.ndim == 3:
-                # Multi-channel: emit one map per channel.
-                for ch in range(arr.shape[0]):
-                    chan_label = (
-                        ext.header.get(f"C{ch + 1:02}", ext.header.get(f"C{ch + 1}", ""))
-                    ).replace("-", "_").strip().replace(". ", "").replace(" ", "_")
-                    chan_unit = (
-                        ext.header.get(f"U{ch + 1:02}", ext.header.get(f"U{ch + 1}", ""))
-                    ) or unit
-                    maps_data.append({
-                        "group": base_name,
-                        "label": f"{base_name}_{chan_label.lower()}",
-                        "flux": arr[ch],
-                        "ivar": err[ch] if err.ndim == 3 else err,
-                        "mask": qual[ch] if qual.ndim == 3 else qual,
-                        "array_units": chan_unit,
-                    })
+            if array.ndim == 3:
+                for ch in range(array.shape[0]):
+                    chan_label = _normalize_channel_name(
+                        _b2s(_header_indexed_value(ext.header, "C", ch + 1, ""))
+                    )
+                    chan_unit = _b2s(
+                        _header_indexed_value(ext.header, "U", ch + 1, "") or unit
+                    )
+                    maps_data.append(
+                        {
+                            "group": base_name,
+                            "label": f"{base_name}_{chan_label.lower()}",
+                            "flux": array[ch],
+                            "ivar": err[ch] if err.ndim == 3 else err,
+                            "mask": qual[ch] if qual.ndim == 3 else qual,
+                            "array_units": chan_unit,
+                        }
+                    )
             else:
-                maps_data.append({
-                    "group": base_name,
-                    "label": base_name,
-                    "flux": arr,
-                    "ivar": err,
-                    "mask": qual,
-                    "array_units": unit,
-                })
+                maps_data.append(
+                    {
+                        "group": base_name,
+                        "label": base_name,
+                        "flux": array,
+                        "ivar": err,
+                        "mask": qual,
+                        "array_units": unit,
+                    }
+                )
+
+    healpix = lonlat_to_healpix(
+        float(summary_row["ifura"]) * u.deg,
+        float(summary_row["ifudec"]) * u.deg,
+        HEALPIX_DEPTH,
+    ).item()
 
     return {
-        "plateifu": plateifu,
+        "object_id": plateifu,
+        "ra": float(summary_row["ifura"]),
+        "dec": float(summary_row["ifudec"]),
+        "healpix": healpix,
+        "z": float(summary_row["nsa_z"]),
+        "spaxel_size": float(SPAXEL_SIZE_ARCSEC),
+        "spaxel_size_units": "arcsec",
+        "spatial_shape_y": int(ny),
+        "spatial_shape_x": int(nx),
         "spaxels": {
-            "flux": flux_2d, "ivar": ivar_2d, "mask": mask_2d,
-            "lsf": lsf_2d, "lambda": lam_2d,
-            "x": x_arr, "y": y_arr, "spaxel_idx": spaxel_idx,
-            "flux_units": [flux_units] * nspaxels,
-            "lambda_units": [lambda_units] * nspaxels,
-            "skycoo_x": skycoo[0].reshape(nspaxels),
-            "skycoo_y": skycoo[1].reshape(nspaxels),
-            "ellcoo_r": ellcoo[0].reshape(nspaxels),
-            "ellcoo_rre": ellcoo[1].reshape(nspaxels),
-            "ellcoo_rkpc": ellcoo[2].reshape(nspaxels),
-            "ellcoo_theta": ellcoo[3].reshape(nspaxels),
-            "skycoo_units": [skycoo_units] * nspaxels,
-            "ellcoo_r_units": [ellcoo_units[0]] * nspaxels,
-            "ellcoo_rre_units": [ellcoo_units[1]] * nspaxels,
-            "ellcoo_rkpc_units": [ellcoo_units[2]] * nspaxels,
-            "ellcoo_theta_units": [ellcoo_units[3]] * nspaxels,
+            "flux": flux,
+            "ivar": ivar,
+            "mask": mask,
+            "lsf": lsf,
+            "lambda": wave,
+            "x": x_arr,
+            "y": y_arr,
+            "spaxel_idx": spaxel_idx,
+            "flux_units": flux_units,
+            "lambda_units": lambda_units,
+            "skycoo_x": skycoo[0],
+            "skycoo_y": skycoo[1],
+            "ellcoo_r": ellcoo[0],
+            "ellcoo_rre": ellcoo[1],
+            "ellcoo_rkpc": ellcoo[2],
+            "ellcoo_theta": ellcoo[3],
+            "skycoo_units": skycoo_units,
+            "ellcoo_r_units": ellcoo_units[0],
+            "ellcoo_rre_units": ellcoo_units[1],
+            "ellcoo_rkpc_units": ellcoo_units[2],
+            "ellcoo_theta_units": ellcoo_units[3],
         },
         "images": {
             "filter": list(BANDS),
-            "flux": img_stack,                  # (4, 96, 96)
-            "flux_units": ["nanomaggies/pixel"] * N_BANDS,
-            "psf": psf_stack,
-            "psf_units": ["nanomaggies/pixel"] * N_BANDS,
-            "scale": [SPAXEL_SIZE_ARCSEC] * N_BANDS,
-            "scale_units": ["arcsec"] * N_BANDS,
+            "flux": image_flux,
+            "flux_units": ["nanomaggies/pixel"] * len(BANDS),
+            "psf": image_psf,
+            "psf_units": ["nanomaggies/pixel"] * len(BANDS),
+            "scale": [SPAXEL_SIZE_ARCSEC] * len(BANDS),
+            "scale_units": ["arcsec"] * len(BANDS),
         },
         "maps": maps_data,
     }
 
 
+def _ndarray_to_nested_array(array: np.ndarray, value_type: pa.DataType | None = None) -> pa.Array:
+    """Build a nested list array from one numpy ndarray without ``tolist()``."""
+    arr = np.asarray(array)
+    if value_type is None:
+        value_type = pa.from_numpy_dtype(arr.dtype)
+
+    values = pa.array(arr.reshape(-1), type=value_type)
+    nested = values
+    for dim in reversed(arr.shape):
+        offsets = np.arange(0, len(nested) + 1, dim, dtype=np.int32)
+        nested = pa.ListArray.from_arrays(offsets, nested)
+    return nested
+
+
+def _ndarray_column(arrays: list[np.ndarray], value_type: pa.DataType) -> pa.Array:
+    return pa.concat_arrays([_ndarray_to_nested_array(arr, value_type) for arr in arrays])
+
+
 def _build_spaxels_struct(records: list[dict]) -> pa.StructArray:
-    """Convert per-row spaxel dicts into a single struct column.
-
-    The 2D float arrays use the fast ``np_to_pyarrow_list`` path; everything
-    else is built directly with pa.array.
-    """
-    nrows = len(records)
-    spx_list = [r["spaxels"] for r in records]
-    nspax_per_row = [len(s["x"]) for s in spx_list]
-
-    def _2d_list_col(name: str, dtype) -> pa.Array:
-        """Build a list<list<dtype>> column where row i is the per-spaxel
-        flux array for object i (shape ``(nspaxels_i, nwave)``)."""
-        # Concatenate all rows' (nspaxels, nwave) → (sum_nspaxels, nwave)
-        # then build the inner list<float32> via offset arithmetic, then
-        # group by row using outer offsets.
-        arrays = [s[name].astype(dtype) for s in spx_list]
-        if not arrays:
-            return pa.array([], type=pa.list_(pa.list_(pa.from_numpy_dtype(dtype))))
-        all_concat = np.concatenate(arrays, axis=0)
-        # inner list (per-spaxel spectrum)
-        inner = np_to_pyarrow_list(all_concat)
-        # outer list: offsets in units of inner-list length
-        outer_offsets = np.zeros(nrows + 1, dtype=np.int32)
-        for i, n in enumerate(nspax_per_row):
-            outer_offsets[i + 1] = outer_offsets[i] + n
-        return pa.ListArray.from_arrays(values=inner, offsets=outer_offsets)
-
-    def _flat_list_col(name: str, dtype, pa_type) -> pa.Array:
-        """Build a list<dtype> column where row i is a flat per-spaxel array."""
-        arrays = [np.asarray(s[name], dtype=dtype) for s in spx_list]
-        offsets = np.zeros(nrows + 1, dtype=np.int32)
-        for i, a in enumerate(arrays):
-            offsets[i + 1] = offsets[i] + len(a)
-        if arrays:
-            values = pa.array(np.concatenate(arrays), type=pa_type)
-        else:
-            values = pa.array([], type=pa_type)
-        return pa.ListArray.from_arrays(values=values, offsets=offsets)
-
-    def _str_list_col(name: str) -> pa.Array:
-        offsets = np.zeros(nrows + 1, dtype=np.int32)
-        flat: list[str] = []
-        for i, s in enumerate(spx_list):
-            flat.extend(s[name])
-            offsets[i + 1] = offsets[i] + len(s[name])
-        return pa.ListArray.from_arrays(
-            values=pa.array(flat, type=pa.string()),
-            offsets=offsets,
-        )
-
-    fields = {
-        "flux":      _2d_list_col("flux", np.float32),
-        "ivar":      _2d_list_col("ivar", np.float32),
-        "mask":      _2d_list_col("mask", np.int64),
-        "lsf":       _2d_list_col("lsf", np.float32),
-        "lambda":    _2d_list_col("lambda", np.float32),
-        "x":         _flat_list_col("x", np.int8, pa.int8()),
-        "y":         _flat_list_col("y", np.int8, pa.int8()),
-        "spaxel_idx": _flat_list_col("spaxel_idx", np.int16, pa.int16()),
-        "flux_units":   _str_list_col("flux_units"),
-        "lambda_units": _str_list_col("lambda_units"),
-        "skycoo_x":    _flat_list_col("skycoo_x", np.float32, pa.float32()),
-        "skycoo_y":    _flat_list_col("skycoo_y", np.float32, pa.float32()),
-        "ellcoo_r":    _flat_list_col("ellcoo_r", np.float32, pa.float32()),
-        "ellcoo_rre":  _flat_list_col("ellcoo_rre", np.float32, pa.float32()),
-        "ellcoo_rkpc": _flat_list_col("ellcoo_rkpc", np.float32, pa.float32()),
-        "ellcoo_theta": _flat_list_col("ellcoo_theta", np.float32, pa.float32()),
-        "skycoo_units":      _str_list_col("skycoo_units"),
-        "ellcoo_r_units":    _str_list_col("ellcoo_r_units"),
-        "ellcoo_rre_units":  _str_list_col("ellcoo_rre_units"),
-        "ellcoo_rkpc_units": _str_list_col("ellcoo_rkpc_units"),
-        "ellcoo_theta_units": _str_list_col("ellcoo_theta_units"),
-    }
-    return pa.StructArray.from_arrays(list(fields.values()), names=list(fields.keys()))
+    spx = [record["spaxels"] for record in records]
+    return pa.StructArray.from_arrays(
+        [
+            _ndarray_column([row["flux"] for row in spx], pa.float32()),
+            _ndarray_column([row["ivar"] for row in spx], pa.float32()),
+            _ndarray_column([row["mask"] for row in spx], pa.int64()),
+            _ndarray_column([row["lsf"] for row in spx], pa.float32()),
+            _ndarray_column([row["lambda"] for row in spx], pa.float32()),
+            _ndarray_column([row["x"] for row in spx], pa.int8()),
+            _ndarray_column([row["y"] for row in spx], pa.int8()),
+            _ndarray_column([row["spaxel_idx"] for row in spx], pa.int16()),
+            pa.array([row["flux_units"] for row in spx], type=pa.string()),
+            pa.array([row["lambda_units"] for row in spx], type=pa.string()),
+            _ndarray_column([row["skycoo_x"] for row in spx], pa.float32()),
+            _ndarray_column([row["skycoo_y"] for row in spx], pa.float32()),
+            _ndarray_column([row["ellcoo_r"] for row in spx], pa.float32()),
+            _ndarray_column([row["ellcoo_rre"] for row in spx], pa.float32()),
+            _ndarray_column([row["ellcoo_rkpc"] for row in spx], pa.float32()),
+            _ndarray_column([row["ellcoo_theta"] for row in spx], pa.float32()),
+            pa.array([row["skycoo_units"] for row in spx], type=pa.string()),
+            pa.array([row["ellcoo_r_units"] for row in spx], type=pa.string()),
+            pa.array([row["ellcoo_rre_units"] for row in spx], type=pa.string()),
+            pa.array([row["ellcoo_rkpc_units"] for row in spx], type=pa.string()),
+            pa.array([row["ellcoo_theta_units"] for row in spx], type=pa.string()),
+        ],
+        names=[
+            "flux",
+            "ivar",
+            "mask",
+            "lsf",
+            "lambda",
+            "x",
+            "y",
+            "spaxel_idx",
+            "flux_units",
+            "lambda_units",
+            "skycoo_x",
+            "skycoo_y",
+            "ellcoo_r",
+            "ellcoo_rre",
+            "ellcoo_rkpc",
+            "ellcoo_theta",
+            "skycoo_units",
+            "ellcoo_r_units",
+            "ellcoo_rre_units",
+            "ellcoo_rkpc_units",
+            "ellcoo_theta_units",
+        ],
+    )
 
 
 def _build_images_struct(records: list[dict]) -> pa.StructArray:
-    n = len(records)
-    bands = pa.array([r["images"]["filter"] for r in records], type=pa.list_(pa.string()))
-
-    def _img_col(key: str) -> pa.Array:
-        # records[i]["images"][key] has shape (4, 96, 96).
-        nested = [
-            [[list(row) for row in band] for band in r["images"][key]]
-            for r in records
-        ]
-        return pa.array(nested, type=pa.list_(pa.list_(pa.list_(pa.float32()))))
-
+    images = [record["images"] for record in records]
     return pa.StructArray.from_arrays(
         [
-            bands,
-            _img_col("flux"),
-            pa.array([r["images"]["flux_units"] for r in records], type=pa.list_(pa.string())),
-            _img_col("psf"),
-            pa.array([r["images"]["psf_units"] for r in records], type=pa.list_(pa.string())),
-            pa.array([r["images"]["scale"] for r in records], type=pa.list_(pa.float32())),
-            pa.array([r["images"]["scale_units"] for r in records], type=pa.list_(pa.string())),
+            pa.array([row["filter"] for row in images], type=pa.list_(pa.string())),
+            _ndarray_column([row["flux"] for row in images], pa.float32()),
+            pa.array([row["flux_units"] for row in images], type=pa.list_(pa.string())),
+            _ndarray_column([row["psf"] for row in images], pa.float32()),
+            pa.array([row["psf_units"] for row in images], type=pa.list_(pa.string())),
+            pa.array([row["scale"] for row in images], type=pa.list_(pa.float32())),
+            pa.array([row["scale_units"] for row in images], type=pa.list_(pa.string())),
         ],
         names=["filter", "flux", "flux_units", "psf", "psf_units", "scale", "scale_units"],
     )
 
 
-def _build_maps_struct(records: list[dict]) -> pa.StructArray:
-    n = len(records)
-    groups = []
-    labels = []
-    flux_per_row = []
-    ivar_per_row = []
-    mask_per_row = []
-    units = []
-    for r in records:
-        gs, ls, fl, iv, mk, un = [], [], [], [], [], []
-        for m in r["maps"]:
-            gs.append(m["group"])
-            ls.append(m["label"])
-            fl.append([list(row) for row in m["flux"]])
-            iv.append([list(row) for row in m["ivar"]])
-            mk.append([list(row) for row in m["mask"]])
-            un.append(m["array_units"])
-        groups.append(gs)
-        labels.append(ls)
-        flux_per_row.append(fl)
-        ivar_per_row.append(iv)
-        mask_per_row.append(mk)
-        units.append(un)
+def _maps_cube(record: dict, key: str, dtype) -> np.ndarray:
+    maps = record["maps"]
+    if not maps:
+        return np.zeros(
+            (0, record["spatial_shape_y"], record["spatial_shape_x"]),
+            dtype=dtype,
+        )
+    return np.stack([np.asarray(m[key], dtype=dtype) for m in maps], axis=0)
 
+
+def _build_maps_struct(records: list[dict]) -> pa.StructArray:
     return pa.StructArray.from_arrays(
         [
-            pa.array(groups, type=pa.list_(pa.string())),
-            pa.array(labels, type=pa.list_(pa.string())),
-            pa.array(flux_per_row, type=pa.list_(pa.list_(pa.list_(pa.float32())))),
-            pa.array(ivar_per_row, type=pa.list_(pa.list_(pa.list_(pa.float32())))),
-            pa.array(mask_per_row, type=pa.list_(pa.list_(pa.list_(pa.float32())))),
-            pa.array(units, type=pa.list_(pa.string())),
+            pa.array([[m["group"] for m in record["maps"]] for record in records], type=pa.list_(pa.string())),
+            pa.array([[m["label"] for m in record["maps"]] for record in records], type=pa.list_(pa.string())),
+            _ndarray_column([_maps_cube(record, "flux", np.float32) for record in records], pa.float32()),
+            _ndarray_column([_maps_cube(record, "ivar", np.float32) for record in records], pa.float32()),
+            _ndarray_column([_maps_cube(record, "mask", np.float32) for record in records], pa.float32()),
+            pa.array([[m["array_units"] for m in record["maps"]] for record in records], type=pa.list_(pa.string())),
         ],
         names=["group", "label", "flux", "ivar", "mask", "array_units"],
     )
 
 
-def build_table(records: list[dict], catalog: Table) -> pa.Table:
-    """Stitch the per-cube records back to the joined catalog and build the
-    PyArrow table."""
-    # Build a plateifu → catalog row map for the surviving plate-ifus.
-    cat_lookup = {}
-    plateifu_col = np.array([_b2s(p) for p in catalog["plateifu"]])
-    for i, p in enumerate(plateifu_col):
-        cat_lookup[p] = i
-
-    keep_records: list[dict] = []
-    keep_indices: list[int] = []
-    for r in records:
-        i = cat_lookup.get(_b2s(r["plateifu"]))
-        if i is None:
-            continue
-        keep_records.append(r)
-        keep_indices.append(i)
-    if not keep_records:
-        raise RuntimeError("No records joined to catalog rows")
-
-    catalog_subset = catalog[np.array(keep_indices)]
-    ra = np.asarray(catalog_subset["ifura"], dtype=np.float64)
-    dec = np.asarray(catalog_subset["ifudec"], dtype=np.float64)
-    z = np.asarray(catalog_subset["nsa_z"], dtype=np.float32)
-    plateifu_arr = np.array([_b2s(p) for p in catalog_subset["plateifu"]])
-
+def build_table(records: list[dict]) -> pa.Table:
     columns: dict[str, pa.Array] = {
-        "ra": pa.array(ra),
-        "dec": pa.array(dec),
-        "object_id": pa.array(plateifu_arr, type=pa.string()),
-        "z": pa.array(z, type=pa.float32()),
-        "spaxel_size": pa.array(
-            np.full(len(keep_records), SPAXEL_SIZE_ARCSEC, dtype=np.float32),
-            type=pa.float32(),
-        ),
-        "spaxel_size_units": pa.array(
-            ["arcsec"] * len(keep_records), type=pa.string()
-        ),
-        "spaxels": _build_spaxels_struct(keep_records),
-        "images":  _build_images_struct(keep_records),
-        "maps":    _build_maps_struct(keep_records),
+        "ra": pa.array([record["ra"] for record in records], type=pa.float64()),
+        "dec": pa.array([record["dec"] for record in records], type=pa.float64()),
+        "object_id": pa.array([record["object_id"] for record in records], type=pa.string()),
+        "healpix": pa.array([record["healpix"] for record in records], type=pa.int64()),
+        "z": pa.array([record["z"] for record in records], type=pa.float32()),
+        "spaxel_size": pa.array([record["spaxel_size"] for record in records], type=pa.float32()),
+        "spaxel_size_units": pa.array([record["spaxel_size_units"] for record in records], type=pa.string()),
+        "spatial_shape_y": pa.array([record["spatial_shape_y"] for record in records], type=pa.int16()),
+        "spatial_shape_x": pa.array([record["spatial_shape_x"] for record in records], type=pa.int16()),
+        "spaxels": _build_spaxels_struct(records),
+        "images": _build_images_struct(records),
+        "maps": _build_maps_struct(records),
     }
     return pa.table(columns)
+
+
+def _write_shard(records: list[dict], shard_dir: str, shard_index: int) -> str:
+    path = os.path.join(shard_dir, f"{CATALOG_NAME}_shard_{shard_index:05d}.parquet")
+    pq.write_table(build_table(records), path, compression="zstd")
+    return path
+
+
+def _load_plateifu_filter(args) -> set[str]:
+    selected = {_b2s(v) for v in args.plateifu}
+    if args.plateifu_file:
+        with open(args.plateifu_file, "r", encoding="utf-8") as handle:
+            selected.update(line.strip() for line in handle if line.strip())
+    return selected
+
+
+def _prepare_work_dir(work_dir: str | None) -> tuple[str, bool]:
+    if work_dir:
+        os.makedirs(work_dir, exist_ok=True)
+        return work_dir, False
+    return tempfile.mkdtemp(prefix="manga_hats_shards_"), True
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw-root", default=DATASETS[CATALOG_NAME].raw_path)
+    parser.add_argument("--drpall-path", default=None)
+    parser.add_argument("--dapall-path", default=None)
     parser.add_argument("--output-root", default=os.path.join(MMU_V2_HATS_ROOT, CATALOG_NAME))
-    parser.add_argument("--max-files", type=int, default=None,
-                        help="Cap on number of plate-ifus to process.")
+    parser.add_argument("--work-dir", default=None, help="Optional directory for intermediate parquet shards.")
+    parser.add_argument("--keep-work-dir", action="store_true", help="Keep an auto-created work dir after success.")
+    parser.add_argument("--max-files", type=int, default=None, help="Cap on number of plate-ifus to process.")
+    parser.add_argument("--plateifu", action="append", default=[], help="Restrict to a specific plate-IFU. Repeat as needed.")
+    parser.add_argument("--plateifu-file", default=None, help="Text file with one plate-IFU per line.")
+    parser.add_argument("--rows-per-shard", type=int, default=1, help="How many MaNGA objects to pack into each parquet shard.")
     parser.add_argument("--pixel-threshold", type=int, default=8192)
+    parser.add_argument("--workers", type=int, default=1, help="Dask workers for the hats-import phase.")
+    parser.add_argument("--debug", action="store_true", help="Run hats-import in single-process debug mode.")
     parser.add_argument("--ra-center", type=float, default=None)
     parser.add_argument("--dec-center", type=float, default=None)
-    parser.add_argument("--radius", type=float, default=None,
-                        help="Cone radius in degrees; requires --ra-center/--dec-center.")
+    parser.add_argument("--radius", type=float, default=None, help="Cone radius in degrees; requires --ra-center/--dec-center.")
     args = parser.parse_args(argv)
 
+    if args.rows_per_shard < 1:
+        raise ValueError("--rows-per-shard must be >= 1")
+
     print(f"Loading drpall + dapall from {args.raw_root}")
-    catalog = load_catalog(args.raw_root)
+    catalog = load_catalog(
+        args.raw_root,
+        drpall_path=args.drpall_path,
+        dapall_path=args.dapall_path,
+    )
     print(f"  {len(catalog)} plate-ifus after DAPDONE join")
+
+    selected_plateifus = _load_plateifu_filter(args)
+    if selected_plateifus:
+        mask = np.array([_b2s(v) in selected_plateifus for v in catalog["plateifu"]], dtype=bool)
+        catalog = catalog[mask]
+        print(f"  {len(catalog)} plate-ifus after explicit plate-IFU filtering")
 
     if args.ra_center is not None and args.dec_center is not None and args.radius is not None:
         mask = apply_cone_filter(
             np.asarray(catalog["ifura"], dtype=np.float64),
             np.asarray(catalog["ifudec"], dtype=np.float64),
-            args.ra_center, args.dec_center, args.radius,
+            args.ra_center,
+            args.dec_center,
+            args.radius,
         )
         catalog = catalog[mask]
         print(
             f"  {len(catalog)} plate-ifus after cone cut "
             f"(ra={args.ra_center}, dec={args.dec_center}, radius={args.radius})"
         )
-        if len(catalog) == 0:
-            print("  no MaNGA targets in cone — nothing to write", file=sys.stderr)
-            return 1
 
     if args.max_files is not None:
         catalog = catalog[:args.max_files]
         print(f"  capped to {len(catalog)} plate-ifus via --max-files")
 
-    records: list[dict] = []
-    for i, row in enumerate(catalog, 1):
-        plateifu = _b2s(row["plateifu"])
-        cube_file = cube_path(args.raw_root, plateifu)
-        map_file = maps_path(args.raw_root, plateifu)
-        try:
-            rec = process_cube(plateifu, cube_file, map_file)
-        except (FileNotFoundError, OSError, KeyError, ValueError) as exc:
-            print(f"  [{i}/{len(catalog)}] {plateifu}: {type(exc).__name__}: {exc}",
-                  file=sys.stderr)
-            continue
-        if rec is None:
-            print(f"  [{i}/{len(catalog)}] {plateifu}: missing cube or map file",
-                  file=sys.stderr)
-            continue
-        records.append(rec)
-        n_maps = len(rec["maps"])
-        print(f"  [{i}/{len(catalog)}] {plateifu}: {n_maps} maps")
-
-    if not records:
-        print("ERROR: no plate-ifus successfully processed", file=sys.stderr)
+    if len(catalog) == 0:
+        print("ERROR: no MaNGA targets selected", file=sys.stderr)
         return 1
 
-    print(f"\nBuilding HATS table with {len(records)} records")
-    table = build_table(records, catalog)
-    print(f"Writing HATS catalog: {table.num_rows} rows")
-    catalog_dir = write_hats(
-        [table],
-        output_path=args.output_root,
-        catalog_name=CATALOG_NAME,
-        pixel_threshold=args.pixel_threshold,
-    )
-    print(f"Done: {catalog_dir}")
-    return 0
+    work_dir, cleanup_work_dir = _prepare_work_dir(args.work_dir)
+    parquet_files: list[str] = []
+    chunk: list[dict] = []
+    shard_index = 0
+    processed = 0
+
+    try:
+        for i, row in enumerate(catalog, 1):
+            plateifu = _b2s(row["plateifu"])
+            try:
+                record = process_cube(row, args.raw_root)
+            except (FileNotFoundError, OSError, KeyError, ValueError) as exc:
+                print(f"  [{i}/{len(catalog)}] {plateifu}: {type(exc).__name__}: {exc}", file=sys.stderr)
+                continue
+
+            if record is None:
+                print(f"  [{i}/{len(catalog)}] {plateifu}: missing cube or map file", file=sys.stderr)
+                continue
+
+            chunk.append(record)
+            processed += 1
+            print(
+                f"  [{i}/{len(catalog)}] {plateifu}: "
+                f"{record['spatial_shape_y']}x{record['spatial_shape_x']} "
+                f"with {len(record['maps'])} maps"
+            )
+
+            if len(chunk) >= args.rows_per_shard:
+                parquet_files.append(_write_shard(chunk, work_dir, shard_index))
+                shard_index += 1
+                chunk.clear()
+
+        if chunk:
+            parquet_files.append(_write_shard(chunk, work_dir, shard_index))
+
+        if not parquet_files:
+            print("ERROR: no plate-ifus successfully processed", file=sys.stderr)
+            return 1
+
+        print(f"\nBuilt {len(parquet_files)} parquet shard(s) for {processed} MaNGA targets")
+        catalog_dir = write_hats_from_parquet(
+            parquet_files,
+            output_path=args.output_root,
+            catalog_name=CATALOG_NAME,
+            pixel_threshold=args.pixel_threshold,
+            n_workers=args.workers,
+            debug=args.debug,
+        )
+        print(f"Done: {catalog_dir}")
+        if cleanup_work_dir and not args.keep_work_dir:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        return 0
+    finally:
+        if cleanup_work_dir and not args.keep_work_dir and os.path.isdir(work_dir):
+            shutil.rmtree(work_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

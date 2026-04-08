@@ -58,6 +58,17 @@ This script processes the data in batch groups organized by healpix id. It aggre
 
  During processing all IFU cubes, and maps have been resized to 96 x 96, with zero-padded elements added around the edges of the data.
 
+### Direct HATS Creation
+
+For the raw -> HATS path, use `build_parent_sample_hats.py` instead. This reads the same raw `drpall` / `dapall` / `LOGCUBE` / `MAPS` inputs directly, but writes a HATS catalog rather than MMU v1 HDF5.
+
+Important difference from the v1 HDF5 builder:
+
+- `build_parent_sample.py` pads every target to `96 x 96`
+- `build_parent_sample_hats.py` keeps the native MaNGA spatial footprint per object
+
+The direct HATS builder preserves the MMU MaNGA field semantics (`spaxels`, `images`, `maps`, top-level metadata), but stores them in a backend-specific representation that is better suited to Parquet/HATS and avoids materializing the whole catalog in memory at once.
+
 ## Dataset Structure
 
 See the `demo_manga.ipynb` Jupyter notebook for an example of how to load and interact with the dataset.  This notebook loads the manga dataaset, gets an entry, inspects the structure of the data, and provides examples of how to plot individual spaxels, images and maps.
