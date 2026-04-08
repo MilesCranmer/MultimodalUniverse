@@ -195,7 +195,7 @@ class TestProcessCube:
         assert record["images"]["flux"].shape == (4, 2, 3)
         assert len(record["maps"]) == 9  # SPX_SKYCOO(2) + SPX_ELLCOO(4) + BINID + EMLINE_GFLUX(2)
         assert record["maps"][0]["label"] == "spx_skycoo_skycoo_x"
-        assert record["maps"][-1]["label"] == "emline_gflux_hb_4862"
+        assert record["maps"][-1]["label"] == "emline_gflux_hb 4862"
         assert record["spaxels"]["ellcoo_r_units"] == "arcsec"
         assert record["spaxels"]["ellcoo_theta_units"] == "deg"
 
@@ -255,8 +255,6 @@ class TestEndToEndHatsWrite:
                     str(output_root),
                     "--work-dir",
                     str(work_dir),
-                    "--plateifu",
-                    "8485-1901",
                     "--rows-per-shard",
                     "1",
                     "--debug",

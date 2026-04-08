@@ -42,20 +42,9 @@ def _to_native(array: np.ndarray, dtype=None) -> np.ndarray:
     return arr.byteswap().view(arr.dtype.newbyteorder("="))
 
 
-def _normalize_channel_name(value: str) -> str:
-    return value.replace("-", "_").strip().replace(". ", "").replace(" ", "_")
-
-
 def _header_indexed_value(header, prefix: str, index: int, default="") -> str:
     """Read ``U1``/``U01``-style FITS header cards."""
     return header.get(f"{prefix}{index:02}", header.get(f"{prefix}{index}", default))
-
-
-def _require_spatial_shape(name: str, array: np.ndarray, expected_shape: tuple[int, int]) -> None:
-    if array.shape[-2:] != expected_shape:
-        raise ValueError(
-            f"{name} has spatial shape {array.shape[-2:]}, expected {expected_shape}"
-        )
 
 
 def _move_spectral_axis_last(array: np.ndarray, dtype) -> np.ndarray:
@@ -66,13 +55,10 @@ def _move_spectral_axis_last(array: np.ndarray, dtype) -> np.ndarray:
 
 def load_catalog(
     raw_root: str,
-    *,
-    drpall_path: str | None = None,
-    dapall_path: str | None = None,
 ) -> Table:
     """Load the joined DRP/DAP catalog."""
-    drpall_file = drpall_path or os.path.join(raw_root, "drpall-v3_1_1.fits")
-    dapall_file = dapall_path or os.path.join(raw_root, "dapall-v3_1_1-3.1.0.fits")
+    drpall_file = os.path.join(raw_root, "drpall-v3_1_1.fits")
+    dapall_file = os.path.join(raw_root, "dapall-v3_1_1-3.1.0.fits")
 
     drpall = Table.read(drpall_file, hdu="MANGA")
     dapall = Table.read(dapall_file, hdu=DAPTYPE)
@@ -166,14 +152,10 @@ def process_cube(summary_row, raw_root: str) -> dict | None:
             [_to_native(np.asarray(cube[f"{band.upper()}PSF"].data), dtype=np.float32) for band in BANDS],
             axis=0,
         )
-        _require_spatial_shape(f"{plateifu} image_flux", image_flux, (ny, nx))
-        _require_spatial_shape(f"{plateifu} image_psf", image_psf, (ny, nx))
 
     with fits.open(map_file) as mapf:
         skycoo = _to_native(np.asarray(mapf["SPX_SKYCOO"].data), dtype=np.float32)
         ellcoo = _to_native(np.asarray(mapf["SPX_ELLCOO"].data), dtype=np.float32)
-        _require_spatial_shape(f"{plateifu} SPX_SKYCOO", skycoo, (ny, nx))
-        _require_spatial_shape(f"{plateifu} SPX_ELLCOO", ellcoo, (ny, nx))
 
         skycoo_units = _b2s(mapf["SPX_SKYCOO"].header.get("BUNIT", ""))
         ellcoo_units = [
@@ -189,7 +171,6 @@ def process_cube(summary_row, raw_root: str) -> dict | None:
                 continue
 
             array = _to_native(np.asarray(ext.data), dtype=np.float32)
-            _require_spatial_shape(f"{plateifu} {ext.name}", array, (ny, nx))
 
             err = _read_optional_map_data(
                 mapf,
@@ -203,16 +184,12 @@ def process_cube(summary_row, raw_root: str) -> dict | None:
                 array.shape,
                 fill_value=MAP_MASK_FILL_VALUE,
             )
-            _require_spatial_shape(f"{plateifu} {ext.name} ERRDATA", err, (ny, nx))
-            _require_spatial_shape(f"{plateifu} {ext.name} QUALDATA", qual, (ny, nx))
 
             unit = _b2s(ext.header.get("BUNIT", ""))
             base_name = ext.name.lower()
             if array.ndim == 3:
                 for ch in range(array.shape[0]):
-                    chan_label = _normalize_channel_name(
-                        _b2s(_header_indexed_value(ext.header, "C", ch + 1, ""))
-                    )
+                    chan_label = _b2s(_header_indexed_value(ext.header, "C", ch + 1, ""))
                     chan_unit = _b2s(
                         _header_indexed_value(ext.header, "U", ch + 1, "") or unit
                     )
@@ -424,14 +401,6 @@ def _write_shard(records: list[dict], shard_dir: str, shard_index: int) -> str:
     return path
 
 
-def _load_plateifu_filter(args) -> set[str]:
-    selected = {_b2s(v) for v in args.plateifu}
-    if args.plateifu_file:
-        with open(args.plateifu_file, "r", encoding="utf-8") as handle:
-            selected.update(line.strip() for line in handle if line.strip())
-    return selected
-
-
 def _prepare_work_dir(work_dir: str | None) -> tuple[str, bool]:
     if work_dir:
         os.makedirs(work_dir, exist_ok=True)
@@ -457,14 +426,9 @@ def _make_hats_client(debug: bool, workers: int) -> Client:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw-root", default=DATASETS[CATALOG_NAME].raw_path)
-    parser.add_argument("--drpall-path", default=None)
-    parser.add_argument("--dapall-path", default=None)
     parser.add_argument("--output-root", default=os.path.join(MMU_V2_HATS_ROOT, CATALOG_NAME))
     parser.add_argument("--work-dir", default=None, help="Optional directory for intermediate parquet shards.")
-    parser.add_argument("--keep-work-dir", action="store_true", help="Keep an auto-created work dir after success.")
     parser.add_argument("--max-files", type=int, default=None, help="Cap on number of plate-ifus to process.")
-    parser.add_argument("--plateifu", action="append", default=[], help="Restrict to a specific plate-IFU. Repeat as needed.")
-    parser.add_argument("--plateifu-file", default=None, help="Text file with one plate-IFU per line.")
     parser.add_argument("--rows-per-shard", type=int, default=1, help="How many MaNGA objects to pack into each parquet shard.")
     parser.add_argument("--pixel-threshold", type=int, default=8192)
     parser.add_argument("--workers", type=int, default=1, help="Dask workers for the hats-import phase.")
@@ -478,18 +442,8 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--rows-per-shard must be >= 1")
 
     print(f"Loading drpall + dapall from {args.raw_root}")
-    catalog = load_catalog(
-        args.raw_root,
-        drpall_path=args.drpall_path,
-        dapall_path=args.dapall_path,
-    )
+    catalog = load_catalog(args.raw_root)
     print(f"  {len(catalog)} plate-ifus after DAPDONE join")
-
-    selected_plateifus = _load_plateifu_filter(args)
-    if selected_plateifus:
-        mask = np.array([_b2s(v) in selected_plateifus for v in catalog["plateifu"]], dtype=bool)
-        catalog = catalog[mask]
-        print(f"  {len(catalog)} plate-ifus after explicit plate-IFU filtering")
 
     if args.ra_center is not None and args.dec_center is not None and args.radius is not None:
         mask = apply_cone_filter(
@@ -564,11 +518,11 @@ def main(argv: list[str] | None = None) -> int:
                 client=client,
             )
         print(f"Done: {catalog_dir}")
-        if cleanup_work_dir and not args.keep_work_dir:
+        if cleanup_work_dir:
             shutil.rmtree(work_dir, ignore_errors=True)
         return 0
     finally:
-        if cleanup_work_dir and not args.keep_work_dir and os.path.isdir(work_dir):
+        if cleanup_work_dir and os.path.isdir(work_dir):
             shutil.rmtree(work_dir, ignore_errors=True)
 
 
