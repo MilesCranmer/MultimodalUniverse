@@ -29,7 +29,7 @@ dependencies = [
     "hats-import>=0.9.0",
     "lsdb>=0.9.0",
     "pyarrow",
-    "numpy",
+    "numpy>=2.3",
     "healpy",
     "dask[distributed]",
     "universal_pathlib",

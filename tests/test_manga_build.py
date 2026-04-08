@@ -1,17 +1,16 @@
-"""Fast unit tests for scripts/manga/build_parent_sample_hats.py.
+"""Tests for the direct MaNGA HATS builder."""
 
-The full process_cube path needs real LOGCUBE/MAPS FITS files which are
-hard to fabricate, so we test the pure-Python helpers (path construction,
-padding, struct assembly) and exercise build_table with hand-rolled fake
-records that match the expected dict shape.
-"""
+from __future__ import annotations
 
 import importlib.util
 import os
+from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.dataset as ds
 import pytest
+from astropy.io import fits
 from astropy.table import Table
 
 
@@ -28,151 +27,257 @@ def _load_build_module():
 build = _load_build_module()
 
 
-class TestPathConstruction:
-    def test_cube_path(self):
-        p = build.cube_path("/data", "8485-1901")
-        assert p.endswith("dr17/manga/spectro/redux/v3_1_1/8485/stack/manga-8485-1901-LOGCUBE.fits.gz")
+def _write_catalogs(raw_root: Path, plateifu: str = "8485-1901") -> tuple[Path, Path]:
+    drpall = Table(
+        {
+            "plateifu": np.array([plateifu, "9999-0001"]),
+            "ifura": np.array([150.0, 151.0], dtype=np.float64),
+            "ifudec": np.array([2.0, 3.0], dtype=np.float64),
+            "nsa_z": np.array([0.05, 0.07], dtype=np.float32),
+        }
+    )
+    dapall = Table(
+        {
+            "PLATEIFU": np.array([plateifu, "9999-0001"]),
+            "DAPDONE": np.array([True, False]),
+        }
+    )
 
-    def test_maps_path(self):
-        p = build.maps_path("/data", "8485-1901")
-        assert "spectro/analysis/v3_1_1/3.1.0/HYB10-MILESHC-MASTARSSP/8485/1901" in p
-        assert p.endswith("manga-8485-1901-MAPS-HYB10-MILESHC-MASTARSSP.fits.gz")
-
-
-class TestPadSpatial:
-    def test_pad_2d(self):
-        arr = np.zeros((40, 40), dtype=np.float32)
-        out = build._pad_spatial(arr)
-        assert out.shape == (96, 96)
-
-    def test_pad_3d(self):
-        arr = np.ones((4563, 40, 40), dtype=np.float32)
-        out = build._pad_spatial(arr)
-        assert out.shape == (4563, 96, 96)
-        # Center should still be 1, edges 0
-        assert out[0, 48, 48] == 1
-        assert out[0, 0, 0] == 0
-
-    def test_pad_already_full(self):
-        arr = np.ones((96, 96), dtype=np.float32)
-        out = build._pad_spatial(arr)
-        assert out.shape == (96, 96)
+    drpall_path = raw_root / "drpall-v3_1_1.fits"
+    dapall_path = raw_root / "dapall-v3_1_1-3.1.0.fits"
+    fits.HDUList([fits.PrimaryHDU(), fits.BinTableHDU(drpall, name="MANGA")]).writeto(
+        drpall_path, overwrite=True
+    )
+    fits.HDUList(
+        [fits.PrimaryHDU(), fits.BinTableHDU(dapall, name=build.DAPTYPE)]
+    ).writeto(dapall_path, overwrite=True)
+    return drpall_path, dapall_path
 
 
-def _fake_record(plateifu="8485-1901", n_maps=3):
-    """Build a synthetic record matching the dict shape produced by process_cube."""
-    nspaxels = build.IMAGE_SIZE * build.IMAGE_SIZE
-    nwave = 10  # tiny for tests
-    spaxels = {
-        "flux":   np.ones((nspaxels, nwave), dtype=np.float32),
-        "ivar":   np.ones((nspaxels, nwave), dtype=np.float32),
-        "mask":   np.zeros((nspaxels, nwave), dtype=np.int64),
-        "lsf":    np.ones((nspaxels, nwave), dtype=np.float32),
-        "lambda": np.tile(np.linspace(3500, 9000, nwave, dtype=np.float32), (nspaxels, 1)),
-        "x": np.arange(nspaxels, dtype=np.int8),
-        "y": np.arange(nspaxels, dtype=np.int8),
-        "spaxel_idx": np.arange(nspaxels, dtype=np.int16),
-        "flux_units":   ["1e-17 erg/s/cm^2/Å"] * nspaxels,
-        "lambda_units": ["Angstrom"] * nspaxels,
-        "skycoo_x":     np.zeros(nspaxels, dtype=np.float32),
-        "skycoo_y":     np.zeros(nspaxels, dtype=np.float32),
-        "ellcoo_r":     np.zeros(nspaxels, dtype=np.float32),
-        "ellcoo_rre":   np.zeros(nspaxels, dtype=np.float32),
-        "ellcoo_rkpc":  np.zeros(nspaxels, dtype=np.float32),
-        "ellcoo_theta": np.zeros(nspaxels, dtype=np.float32),
-        "skycoo_units":      ["arcsec"] * nspaxels,
-        "ellcoo_r_units":    ["arcsec"] * nspaxels,
-        "ellcoo_rre_units":  [""] * nspaxels,
-        "ellcoo_rkpc_units": ["kpc"] * nspaxels,
-        "ellcoo_theta_units": ["degree"] * nspaxels,
-    }
-    images = {
-        "filter": list(build.BANDS),
-        "flux": np.ones((build.N_BANDS, build.IMAGE_SIZE, build.IMAGE_SIZE), dtype=np.float32),
-        "flux_units": ["nanomaggies/pixel"] * build.N_BANDS,
-        "psf": np.ones((build.N_BANDS, build.IMAGE_SIZE, build.IMAGE_SIZE), dtype=np.float32),
-        "psf_units": ["nanomaggies/pixel"] * build.N_BANDS,
-        "scale": [build.SPAXEL_SIZE_ARCSEC] * build.N_BANDS,
-        "scale_units": ["arcsec"] * build.N_BANDS,
-    }
-    maps = []
-    for i in range(n_maps):
-        maps.append({
-            "group": f"group_{i}",
-            "label": f"label_{i}",
-            "flux": np.ones((build.IMAGE_SIZE, build.IMAGE_SIZE), dtype=np.float32),
-            "ivar": np.ones((build.IMAGE_SIZE, build.IMAGE_SIZE), dtype=np.float32),
-            "mask": np.zeros((build.IMAGE_SIZE, build.IMAGE_SIZE), dtype=np.float32),
-            "array_units": "unit",
-        })
-    return {"plateifu": plateifu, "spaxels": spaxels, "images": images, "maps": maps}
+def _write_cube(raw_root: Path, plateifu: str = "8485-1901") -> Path:
+    plate, _ = plateifu.split("-")
+    cube_dir = raw_root / "dr17" / "manga" / "spectro" / "redux" / "v3_1_1" / plate / "stack"
+    cube_dir.mkdir(parents=True, exist_ok=True)
+    cube_path = cube_dir / f"manga-{plateifu}-LOGCUBE.fits.gz"
+
+    nwave, ny, nx = 4, 2, 3
+    base = np.arange(nwave * ny * nx, dtype=np.float32).reshape(nwave, ny, nx)
+    mask = (100 + np.arange(nwave * ny * nx, dtype=np.int64)).reshape(nwave, ny, nx)
+    image = np.arange(ny * nx, dtype=np.float32).reshape(ny, nx)
+
+    flux_hdu = fits.ImageHDU(base.copy(), name="FLUX")
+    flux_hdu.header["BUNIT"] = "1e-17 erg/s/cm^2/Ang/spaxel"
+    flux_hdu.header["CUNIT3"] = "Angstrom"
+
+    hdus = [fits.PrimaryHDU(), flux_hdu]
+    hdus.append(fits.ImageHDU((base + 100).astype(np.float32), name="IVAR"))
+    hdus.append(fits.ImageHDU(mask, name="MASK"))
+    hdus.append(fits.ImageHDU((base + 200).astype(np.float32), name="LSFPOST"))
+    hdus.append(fits.ImageHDU(np.linspace(3500, 3503, nwave, dtype=np.float32), name="WAVE"))
+
+    for idx, band in enumerate(build.BANDS):
+        hdus.append(fits.ImageHDU((image + idx).astype(np.float32), name=f"{band.upper()}IMG"))
+    for idx, band in enumerate(build.BANDS):
+        hdus.append(fits.ImageHDU((image + 10 + idx).astype(np.float32), name=f"{band.upper()}PSF"))
+
+    fits.HDUList(hdus).writeto(cube_path, overwrite=True)
+    return cube_path
 
 
-def _fake_catalog(plateifus=("8485-1901",)):
-    return Table({
-        "plateifu": np.array(list(plateifus)),
-        "ifura": np.full(len(plateifus), 150.0, dtype=np.float64),
-        "ifudec": np.full(len(plateifus), 2.0, dtype=np.float64),
-        "nsa_z": np.full(len(plateifus), 0.05, dtype=np.float32),
-    })
+def _write_maps(raw_root: Path, plateifu: str = "8485-1901") -> Path:
+    plate, ifu = plateifu.split("-")
+    maps_dir = (
+        raw_root
+        / "dr17"
+        / "manga"
+        / "spectro"
+        / "analysis"
+        / "v3_1_1"
+        / "3.1.0"
+        / build.DAPTYPE
+        / plate
+        / ifu
+    )
+    maps_dir.mkdir(parents=True, exist_ok=True)
+    maps_path = maps_dir / f"manga-{plateifu}-MAPS-{build.DAPTYPE}.fits.gz"
+
+    ny, nx = 2, 3
+    skycoo = np.array(
+        [
+            [[0.0, 0.5, 1.0], [1.5, 2.0, 2.5]],
+            [[-0.5, -0.25, 0.0], [0.25, 0.5, 0.75]],
+        ],
+        dtype=np.float32,
+    )
+    ellcoo = np.array(
+        [
+            [[1, 2, 3], [4, 5, 6]],
+            [[7, 8, 9], [10, 11, 12]],
+            [[13, 14, 15], [16, 17, 18]],
+            [[19, 20, 21], [22, 23, 24]],
+        ],
+        dtype=np.float32,
+    )
+
+    spx_skycoo = fits.ImageHDU(skycoo, name="SPX_SKYCOO")
+    spx_skycoo.header["BUNIT"] = "arcsec"
+    spx_skycoo.header["C01"] = "skycoo_x"
+    spx_skycoo.header["C02"] = "skycoo_y"
+
+    spx_ellcoo = fits.ImageHDU(ellcoo, name="SPX_ELLCOO")
+    spx_ellcoo.header["C01"] = "ellcoo_r"
+    spx_ellcoo.header["C02"] = "ellcoo_rre"
+    spx_ellcoo.header["C03"] = "ellcoo_rkpc"
+    spx_ellcoo.header["C04"] = "ellcoo_theta"
+    spx_ellcoo.header["U01"] = "arcsec"
+    spx_ellcoo.header["U02"] = "r/re"
+    spx_ellcoo.header["U03"] = "kpc"
+    spx_ellcoo.header["U04"] = "deg"
+
+    binid = fits.ImageHDU(np.arange(ny * nx, dtype=np.float32).reshape(ny, nx), name="BINID")
+    binid.header["BUNIT"] = "bin"
+
+    emline = np.arange(2 * ny * nx, dtype=np.float32).reshape(2, ny, nx)
+    emline_hdu = fits.ImageHDU(emline, name="EMLINE_GFLUX")
+    emline_hdu.header["ERRDATA"] = "EMLINE_GFLUX_IVAR"
+    emline_hdu.header["QUALDATA"] = "EMLINE_GFLUX_MASK"
+    emline_hdu.header["BUNIT"] = "1e-17"
+    emline_hdu.header["C01"] = "Ha 6564"
+    emline_hdu.header["C02"] = "Hb 4862"
+    emline_hdu.header["U01"] = "1e-17"
+    emline_hdu.header["U02"] = "1e-17"
+
+    emline_ivar = fits.ImageHDU((emline + 100).astype(np.float32), name="EMLINE_GFLUX_IVAR")
+    emline_mask = fits.ImageHDU((emline + 200).astype(np.float32), name="EMLINE_GFLUX_MASK")
+
+    fits.HDUList(
+        [
+            fits.PrimaryHDU(),
+            spx_skycoo,
+            spx_ellcoo,
+            binid,
+            emline_hdu,
+            emline_ivar,
+            emline_mask,
+        ]
+    ).writeto(maps_path, overwrite=True)
+    return maps_path
+
+
+def _make_raw_fixture(tmp_path: Path, plateifu: str = "8485-1901") -> Path:
+    raw_root = tmp_path / "raw"
+    raw_root.mkdir()
+    _write_catalogs(raw_root, plateifu=plateifu)
+    _write_cube(raw_root, plateifu=plateifu)
+    _write_maps(raw_root, plateifu=plateifu)
+    return raw_root
+
+
+class TestCatalogLoading:
+    def test_load_catalog_filters_dapdone(self, tmp_path):
+        raw_root = _make_raw_fixture(tmp_path)
+        catalog = build.load_catalog(str(raw_root))
+        assert len(catalog) == 1
+        assert catalog["plateifu"][0] == "8485-1901"
+
+
+class TestProcessCube:
+    def test_process_cube_preserves_native_shape(self, tmp_path):
+        raw_root = _make_raw_fixture(tmp_path)
+        catalog = build.load_catalog(str(raw_root))
+        record = build.process_cube(catalog[0], str(raw_root))
+
+        assert record["object_id"] == "8485-1901"
+        assert record["spatial_shape_y"] == 2
+        assert record["spatial_shape_x"] == 3
+        assert record["spaxels"]["flux"].shape == (2, 3, 4)
+        assert record["spaxels"]["lambda"].shape == (4,)
+        assert record["images"]["flux"].shape == (4, 2, 3)
+        assert len(record["maps"]) == 9  # SPX_SKYCOO(2) + SPX_ELLCOO(4) + BINID + EMLINE_GFLUX(2)
+        assert record["maps"][0]["label"] == "spx_skycoo_skycoo_x"
+        assert record["maps"][-1]["label"] == "emline_gflux_hb 4862"
+        assert record["spaxels"]["ellcoo_r_units"] == "arcsec"
+        assert record["spaxels"]["ellcoo_theta_units"] == "deg"
 
 
 class TestBuildTable:
-    def test_top_level_columns(self):
-        rec = _fake_record()
-        cat = _fake_catalog(["8485-1901"])
-        table = build.build_table([rec], cat)
-        assert table.num_rows == 1
+    def test_schema_contains_native_shape_and_nested_payloads(self, tmp_path):
+        raw_root = _make_raw_fixture(tmp_path)
+        catalog = build.load_catalog(str(raw_root))
+        record = build.process_cube(catalog[0], str(raw_root))
+        table = build.build_table([record])
+
         names = set(table.schema.names)
-        assert {"ra", "dec", "object_id", "z", "spaxel_size",
-                "spaxel_size_units", "spaxels", "images", "maps"} <= names
+        assert {
+            "ra",
+            "dec",
+            "object_id",
+            "healpix",
+            "z",
+            "spaxel_size",
+            "spaxel_size_units",
+            "spatial_shape_y",
+            "spatial_shape_x",
+            "spaxels",
+            "images",
+            "maps",
+        } <= names
 
-    def test_spaxels_struct_subfields(self):
-        table = build.build_table([_fake_record()], _fake_catalog(["8485-1901"]))
-        spx = table.schema.field("spaxels").type
-        assert pa.types.is_struct(spx)
-        names = {f.name for f in spx}
-        assert {"flux", "ivar", "mask", "lsf", "lambda", "x", "y",
-                "spaxel_idx", "flux_units", "lambda_units",
-                "skycoo_x", "skycoo_y", "ellcoo_r", "ellcoo_rre",
-                "ellcoo_rkpc", "ellcoo_theta"} <= names
+        spaxels_type = table.schema.field("spaxels").type
+        assert pa.types.is_struct(spaxels_type)
+        assert spaxels_type["flux"].type == pa.list_(pa.list_(pa.list_(pa.float32())))
+        assert spaxels_type["lambda_units"].type == pa.string()
 
-    def test_images_struct_subfields(self):
-        table = build.build_table([_fake_record()], _fake_catalog(["8485-1901"]))
-        ims = table.schema.field("images").type
-        assert pa.types.is_struct(ims)
-        names = {f.name for f in ims}
-        assert names == {"filter", "flux", "flux_units", "psf", "psf_units", "scale", "scale_units"}
+        row = table.column("spaxels")[0].as_py()
+        assert len(row["flux"]) == 2
+        assert len(row["flux"][0]) == 3
+        assert len(row["flux"][0][0]) == 4
 
-    def test_maps_struct_subfields(self):
-        table = build.build_table([_fake_record(n_maps=5)], _fake_catalog(["8485-1901"]))
-        mps = table.schema.field("maps").type
-        assert pa.types.is_struct(mps)
-        names = {f.name for f in mps}
-        assert names == {"group", "label", "flux", "ivar", "mask", "array_units"}
+        images = table.column("images")[0].as_py()
+        assert images["filter"] == build.BANDS
+        assert len(images["flux"]) == 4
+        assert len(images["flux"][0]) == 2
+        assert len(images["flux"][0][0]) == 3
 
-    def test_first_row_shapes(self):
-        rec = _fake_record(n_maps=3)
-        table = build.build_table([rec], _fake_catalog(["8485-1901"]))
-        nspaxels = build.IMAGE_SIZE * build.IMAGE_SIZE
-        spx = table.column("spaxels")[0].as_py()
-        assert len(spx["x"]) == nspaxels
-        assert len(spx["flux"]) == nspaxels
-        # Per-spaxel flux is 10 elements (the tiny test nwave).
-        assert len(spx["flux"][0]) == 10
 
-        ims = table.column("images")[0].as_py()
-        assert ims["filter"] == build.BANDS
-        flux = np.asarray(ims["flux"])
-        assert flux.shape == (build.N_BANDS, build.IMAGE_SIZE, build.IMAGE_SIZE)
+class TestEndToEndHatsWrite:
+    def test_main_writes_hats_catalog(self, tmp_path):
+        raw_root = _make_raw_fixture(tmp_path)
+        output_root = tmp_path / "out"
+        work_dir = tmp_path / "work"
 
-        mps = table.column("maps")[0].as_py()
-        assert len(mps["group"]) == 3
-        assert mps["group"] == ["group_0", "group_1", "group_2"]
-        flux_maps = np.asarray(mps["flux"])
-        assert flux_maps.shape == (3, build.IMAGE_SIZE, build.IMAGE_SIZE)
+        try:
+            rc = build.main(
+                [
+                    "--raw-root",
+                    str(raw_root),
+                    "--output-root",
+                    str(output_root),
+                    "--rows-per-shard",
+                    "1",
+                ]
+            )
+        except RuntimeError as exc:
+            if "Operation not permitted" in str(exc):
+                pytest.skip("local Dask scheduler sockets are blocked in this sandbox")
+            raise
+        assert rc == 0
 
-    def test_drops_records_not_in_catalog(self):
-        rec = _fake_record(plateifu="9999-9999")  # not in catalog
-        with pytest.raises(RuntimeError, match="No records joined"):
-            build.build_table([rec], _fake_catalog(["8485-1901"]))
+        hats_root = output_root / "manga" / "manga"
+        dataset = ds.dataset(str(hats_root / "dataset"), format="parquet")
+        table = dataset.to_table(
+            columns=["object_id", "ra", "dec", "spatial_shape_y", "spatial_shape_x", "images"]
+        )
+
+        assert table.num_rows == 1
+        assert table.column("object_id")[0].as_py() == "8485-1901"
+        assert table.column("ra")[0].as_py() == 150.0
+        assert table.column("dec")[0].as_py() == 2.0
+        assert table.column("spatial_shape_y")[0].as_py() == 2
+        assert table.column("spatial_shape_x")[0].as_py() == 3
+
+        images = table.column("images")[0].as_py()
+        assert images["filter"] == build.BANDS
+        assert len(images["flux"]) == 4
+        assert len(images["flux"][0]) == 2
+        assert len(images["flux"][0][0]) == 3
