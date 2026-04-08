@@ -25,7 +25,6 @@ CATALOG_NAME = "manga"
 DAPTYPE = "HYB10-MILESHC-MASTARSSP"
 SPAXEL_SIZE_ARCSEC = 0.5
 HEALPIX_DEPTH = 4
-MAP_MASK_FILL_VALUE = 1073741824.0
 BANDS = ["g", "r", "i", "z"]
 
 
@@ -115,6 +114,14 @@ def _read_optional_map_data(
     return np.full(shape, fill_value, dtype=np.float32)
 
 
+def _read_required_map_data(mapf: fits.HDUList, ext_name: str | None) -> np.ndarray:
+    if not ext_name:
+        raise KeyError("missing QUALDATA header reference")
+    if ext_name not in mapf:
+        raise KeyError(f"missing MAPS extension {ext_name}")
+    return _to_native(np.asarray(mapf[ext_name].data), dtype=np.float32)
+
+
 def process_cube(summary_row, raw_root: str) -> dict:
     """Read one plate-IFU into a row."""
     plateifu = _b2s(summary_row["plateifu"])
@@ -178,12 +185,7 @@ def process_cube(summary_row, raw_root: str) -> dict:
                 array.shape,
                 fill_value=0.0,
             )
-            qual = _read_optional_map_data(
-                mapf,
-                ext.header.get("QUALDATA"),
-                array.shape,
-                fill_value=MAP_MASK_FILL_VALUE,
-            )
+            qual = _read_required_map_data(mapf, ext.header.get("QUALDATA"))
 
             unit = _b2s(ext.header.get("BUNIT", ""))
             base_name = ext.name.lower()
