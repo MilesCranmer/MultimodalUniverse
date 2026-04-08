@@ -1,23 +1,7 @@
-"""Shared infrastructure for building HATS catalogs from MMU survey data.
-
-The public surface is small:
-
-- ``np_to_pyarrow_list`` — convert a 2D numpy array (one row per object) to a
-  PyArrow ListArray suitable for use as a column in a HATS catalog.
-- ``ArrowTableReader`` — adapter that lets ``hats-import`` consume in-memory
-  PyArrow tables instead of reading from disk.
-- ``write_hats`` — feed a list of PyArrow tables through the ``hats-import``
-  pipeline to produce a HATS catalog (Parquet + healpix partitioning + margin
-  cache + collection wrapper).
-
-Per-survey ``build_parent_sample_hats.py`` scripts (under ``scripts/{survey}/``)
-build their own PyArrow tables from the survey-native raw inputs and call
-``write_hats``. This module deliberately knows nothing about HDF5.
-"""
+"""Helpers for writing MMU survey data to HATS."""
 
 import contextlib
 import glob
-import logging
 import os
 import shutil
 import tempfile
@@ -31,18 +15,9 @@ from hats_import import CollectionArguments
 from hats_import.catalog.file_readers import InputReader, ParquetPyarrowReader
 from hats_import.pipeline import pipeline_with_client
 
-LOGGER = logging.getLogger(__name__)
-
-
 @contextmanager
 def numpy_unique_sorted_compat():
-    """Provide ``np.unique(sorted=...)`` on NumPy versions before 2.3.
-
-    ``hats`` currently calls ``np.unique(..., sorted=True, ...)`` during the
-    pixel-mapping stage, but our local MMU environments still use NumPy 1.26.
-    Older NumPy always returns sorted unique values, so ignoring the keyword is
-    a compatible fallback.
-    """
+    """Backfill ``np.unique(sorted=...)`` for older NumPy versions."""
 
     if "sorted" in signature(np.unique).parameters:
         yield
@@ -77,22 +52,14 @@ def numpy_unique_sorted_compat():
 
 
 def to_native_endian(array: np.ndarray) -> np.ndarray:
-    """Return a copy of ``array`` in the machine's native byte order.
-
-    Astropy reads FITS files in the file's byte order (usually big-endian) but
-    PyArrow refuses to ingest byte-swapped arrays — convert before handing to
-    ``pa.array``.
-    """
+    """Return ``array`` in native byte order."""
     if array.dtype.byteorder in ("=", "|"):
         return array
     return array.byteswap().view(array.dtype.newbyteorder("="))
 
 
 def np_to_pyarrow_list(array: np.ndarray) -> pa.Array:
-    """Convert a 1D numpy array to a flat PyArrow array, or a 2D numpy array
-    (shape ``(n_rows, length)``) to a PyArrow ListArray with one ``length``-long
-    list per row.
-    """
+    """Convert a 1D or 2D numpy array to Arrow."""
     if array.dtype.byteorder == ">":
         array = array.byteswap().view(array.dtype.newbyteorder("<"))
     values = pa.array(array.reshape(-1))
@@ -108,10 +75,7 @@ def np_to_pyarrow_list(array: np.ndarray) -> pa.Array:
 
 
 class ArrowTableReader(InputReader):
-    """``hats-import`` ``InputReader`` that yields pre-built PyArrow tables.
-
-    Each "input file" is just an integer index into the in-memory table list.
-    """
+    """``hats-import`` reader for in-memory PyArrow tables."""
 
     def __init__(self, tables: list[pa.Table]):
         self.tables = tables
@@ -202,7 +166,7 @@ def write_hats(
     debug: bool = True,
     client: Client | None = None,
 ) -> str:
-    """Write a list of PyArrow tables as a HATS catalog under ``output_path``."""
+    """Write in-memory tables to HATS."""
     reader = ArrowTableReader(tables)
     return _run_hats_import(
         input_file_list=[str(i) for i in range(len(tables))],
@@ -231,7 +195,7 @@ def write_hats_from_parquet(
     chunksize: int = 500_000,
     client: Client | None = None,
 ) -> str:
-    """Write a HATS catalog from explicit parquet shard files."""
+    """Write a HATS catalog from parquet shard files."""
     if not parquet_files:
         raise FileNotFoundError("no parquet shard files provided")
 
@@ -263,7 +227,7 @@ def write_hats_from_parquet_dir(
     debug: bool = True,
     client: Client | None = None,
 ) -> str:
-    """Write a HATS catalog by streaming parquet files from a directory."""
+    """Write a HATS catalog from a parquet directory."""
     if not os.path.isdir(parquet_dir):
         raise FileNotFoundError(f"parquet_dir does not exist: {parquet_dir}")
 

@@ -1,9 +1,4 @@
-"""Validate direct MaNGA HATS output against the existing MMU v1 HDF5 view.
-
-This script treats the v1 HDF5 sample as the semantic reference and adapts the
-native-shape HATS rows back onto the old padded ``96x96`` canvas so the two can
-be compared exactly.
-"""
+"""Validate direct MaNGA HATS output against the v1 MaNGA sample."""
 
 from __future__ import annotations
 

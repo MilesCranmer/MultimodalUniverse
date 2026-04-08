@@ -1,9 +1,4 @@
-"""Tests for the direct raw MaNGA -> HATS builder.
-
-These tests build tiny but real FITS fixtures on disk so we exercise the actual
-LOGCUBE/MAPS extraction path, native-shape handling, parquet sharding, and a
-small end-to-end HATS write.
-"""
+"""Tests for the direct MaNGA HATS builder."""
 
 from __future__ import annotations
 

@@ -1,24 +1,4 @@
-"""Convert raw SDSS-IV MaNGA into a HATS catalog.
-
-This builder keeps the existing MMU MaNGA science content and field names, but
-uses a HATS-native physical encoding:
-
-1. Read ``drpall`` + ``dapall``, inner-join on ``plateifu``, and keep only
-   ``DAPDONE`` rows.
-2. For each surviving target, open the raw DRP ``LOGCUBE`` and DAP ``MAPS``
-   FITS files directly.
-3. Preserve the native MaNGA spatial footprint instead of padding everything to
-   the v1 ``96x96`` canvas. Spaxel spectra are stored as ``(y, x, lambda)``
-   cubes, reconstructed images as ``(band, y, x)``, and DAP maps as
-   ``(map, y, x)``.
-4. Write small parquet shards incrementally, then feed those shards through the
-   shared ``hats-import`` pipeline.
-
-The output intentionally keeps MMU's logical fields (``spaxels``, ``images``,
-``maps``, ``object_id``, ``ra``, ``dec``, ``z``, etc.) while changing the
-backend representation for storage and memory efficiency. A v1 compatibility
-adapter lives in the validation tooling, not in the on-disk HATS schema.
-"""
+"""Build a MaNGA HATS catalog directly from DR17 FITS products."""
 
 from __future__ import annotations
 
@@ -27,7 +7,6 @@ import os
 import shutil
 import sys
 import tempfile
-from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
@@ -45,9 +24,6 @@ from mmu.hats_import import write_hats_from_parquet
 CATALOG_NAME = "manga"
 DAPTYPE = "HYB10-MILESHC-MASTARSSP"
 SPAXEL_SIZE_ARCSEC = 0.5
-V1_IMAGE_SIZE = 96
-SPECTRUM_SIZE = 4563
-HEALPIX_NSIDE = 16
 HEALPIX_DEPTH = 4
 MAP_MASK_FILL_VALUE = 1073741824.0
 BANDS = ["g", "r", "i", "z"]
@@ -58,7 +34,7 @@ def _b2s(v) -> str:
 
 
 def _to_native(array: np.ndarray, dtype=None) -> np.ndarray:
-    """Return ``array`` with native byte order and the requested dtype."""
+    """Return ``array`` in native byte order."""
     arr = np.asarray(array, dtype=dtype)
     if arr.dtype.byteorder in ("=", "|"):
         return arr
@@ -70,7 +46,7 @@ def _normalize_channel_name(value: str) -> str:
 
 
 def _header_indexed_value(header, prefix: str, index: int, default="") -> str:
-    """Return a FITS header card value for both ``U1``/``U01``-style conventions."""
+    """Read ``U1``/``U01``-style FITS header cards."""
     return header.get(f"{prefix}{index:02}", header.get(f"{prefix}{index}", default))
 
 
@@ -82,7 +58,7 @@ def _require_spatial_shape(name: str, array: np.ndarray, expected_shape: tuple[i
 
 
 def _move_spectral_axis_last(array: np.ndarray, dtype) -> np.ndarray:
-    """Convert raw FITS ``(lambda, y, x)`` arrays to ``(y, x, lambda)``."""
+    """Move a FITS spectral axis from front to back."""
     array = _to_native(array, dtype=dtype)
     return np.moveaxis(array, 0, -1)
 
@@ -93,7 +69,7 @@ def load_catalog(
     drpall_path: str | None = None,
     dapall_path: str | None = None,
 ) -> Table:
-    """Read drpall + dapall and inner-join on plate-ifu, keeping DAPDONE rows."""
+    """Load the joined DRP/DAP catalog."""
     drpall_file = drpall_path or os.path.join(raw_root, "drpall-v3_1_1.fits")
     dapall_file = dapall_path or os.path.join(raw_root, "dapall-v3_1_1-3.1.0.fits")
 
@@ -154,7 +130,7 @@ def _read_optional_map_data(
 
 
 def process_cube(summary_row, raw_root: str) -> dict | None:
-    """Read one MaNGA plate-ifu (LOGCUBE + DAP MAPS) into one native-shape row."""
+    """Read one plate-IFU into a row."""
     plateifu = _b2s(summary_row["plateifu"])
     cube_file = cube_path(raw_root, plateifu)
     map_file = maps_path(raw_root, plateifu)
@@ -314,7 +290,7 @@ def process_cube(summary_row, raw_root: str) -> dict | None:
 
 
 def _ndarray_to_nested_array(array: np.ndarray, value_type: pa.DataType | None = None) -> pa.Array:
-    """Build a nested list array from one numpy ndarray without ``tolist()``."""
+    """Convert an ndarray to nested Arrow lists without ``tolist()``."""
     arr = np.asarray(array)
     if value_type is None:
         value_type = pa.from_numpy_dtype(arr.dtype)
@@ -476,7 +452,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rows-per-shard", type=int, default=1, help="How many MaNGA objects to pack into each parquet shard.")
     parser.add_argument("--pixel-threshold", type=int, default=8192)
     parser.add_argument("--workers", type=int, default=1, help="Dask workers for the hats-import phase.")
-    parser.add_argument("--debug", action="store_true", help="Run hats-import in single-process debug mode.")
+    parser.add_argument("--debug", action="store_true", help="Run hats-import in a single process.")
     parser.add_argument("--ra-center", type=float, default=None)
     parser.add_argument("--dec-center", type=float, default=None)
     parser.add_argument("--radius", type=float, default=None, help="Cone radius in degrees; requires --ra-center/--dec-center.")
