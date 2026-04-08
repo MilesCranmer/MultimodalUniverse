@@ -253,11 +253,8 @@ class TestEndToEndHatsWrite:
                     str(raw_root),
                     "--output-root",
                     str(output_root),
-                    "--work-dir",
-                    str(work_dir),
                     "--rows-per-shard",
                     "1",
-                    "--debug",
                 ]
             )
         except RuntimeError as exc:

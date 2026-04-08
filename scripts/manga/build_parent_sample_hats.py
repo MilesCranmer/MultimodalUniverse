@@ -17,7 +17,6 @@ from astropy.table import Table, join
 from cdshealpix import lonlat_to_healpix
 from dask.distributed import Client
 
-from mmu.cone import apply_cone_filter
 from mmu.hats_configs import DATASETS, MMU_V2_HATS_ROOT
 from mmu.hats_import import write_hats_from_parquet_dir
 
@@ -401,41 +400,13 @@ def _write_shard(records: list[dict], shard_dir: str, shard_index: int) -> str:
     return path
 
 
-def _prepare_work_dir(work_dir: str | None) -> tuple[str, bool]:
-    if work_dir:
-        os.makedirs(work_dir, exist_ok=True)
-        return work_dir, False
-    return tempfile.mkdtemp(prefix="manga_hats_shards_"), True
-
-
-def _make_hats_client(debug: bool, workers: int) -> Client:
-    if debug:
-        return Client(
-            n_workers=1,
-            threads_per_worker=1,
-            processes=False,
-            dashboard_address=None,
-        )
-    return Client(
-        n_workers=workers,
-        threads_per_worker=1,
-        dashboard_address=None,
-    )
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw-root", default=DATASETS[CATALOG_NAME].raw_path)
     parser.add_argument("--output-root", default=os.path.join(MMU_V2_HATS_ROOT, CATALOG_NAME))
-    parser.add_argument("--work-dir", default=None, help="Optional directory for intermediate parquet shards.")
-    parser.add_argument("--max-files", type=int, default=None, help="Cap on number of plate-ifus to process.")
     parser.add_argument("--rows-per-shard", type=int, default=1, help="How many MaNGA objects to pack into each parquet shard.")
     parser.add_argument("--pixel-threshold", type=int, default=8192)
     parser.add_argument("--workers", type=int, default=1, help="Dask workers for the hats-import phase.")
-    parser.add_argument("--debug", action="store_true", help="Run hats-import in a single process.")
-    parser.add_argument("--ra-center", type=float, default=None)
-    parser.add_argument("--dec-center", type=float, default=None)
-    parser.add_argument("--radius", type=float, default=None, help="Cone radius in degrees; requires --ra-center/--dec-center.")
     args = parser.parse_args(argv)
 
     if args.rows_per_shard < 1:
@@ -445,29 +416,11 @@ def main(argv: list[str] | None = None) -> int:
     catalog = load_catalog(args.raw_root)
     print(f"  {len(catalog)} plate-ifus after DAPDONE join")
 
-    if args.ra_center is not None and args.dec_center is not None and args.radius is not None:
-        mask = apply_cone_filter(
-            np.asarray(catalog["ifura"], dtype=np.float64),
-            np.asarray(catalog["ifudec"], dtype=np.float64),
-            args.ra_center,
-            args.dec_center,
-            args.radius,
-        )
-        catalog = catalog[mask]
-        print(
-            f"  {len(catalog)} plate-ifus after cone cut "
-            f"(ra={args.ra_center}, dec={args.dec_center}, radius={args.radius})"
-        )
-
-    if args.max_files is not None:
-        catalog = catalog[:args.max_files]
-        print(f"  capped to {len(catalog)} plate-ifus via --max-files")
-
     if len(catalog) == 0:
         print("ERROR: no MaNGA targets selected", file=sys.stderr)
         return 1
 
-    work_dir, cleanup_work_dir = _prepare_work_dir(args.work_dir)
+    work_dir = tempfile.mkdtemp(prefix="manga_hats_shards_")
     parquet_files: list[str] = []
     chunk: list[dict] = []
     shard_index = 0
@@ -507,22 +460,24 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         print(f"\nBuilt {len(parquet_files)} parquet shard(s) for {processed} MaNGA targets")
-        with _make_hats_client(args.debug, args.workers) as client:
+        with Client(
+            n_workers=args.workers,
+            threads_per_worker=1,
+            dashboard_address=None,
+        ) as client:
             catalog_dir = write_hats_from_parquet_dir(
                 work_dir,
                 output_path=args.output_root,
                 catalog_name=CATALOG_NAME,
                 pixel_threshold=args.pixel_threshold,
                 n_workers=args.workers,
-                debug=args.debug,
+                debug=False,
                 client=client,
             )
         print(f"Done: {catalog_dir}")
-        if cleanup_work_dir:
-            shutil.rmtree(work_dir, ignore_errors=True)
         return 0
     finally:
-        if cleanup_work_dir and os.path.isdir(work_dir):
+        if os.path.isdir(work_dir):
             shutil.rmtree(work_dir, ignore_errors=True)
 
 
