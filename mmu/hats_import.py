@@ -21,7 +21,6 @@ import logging
 import os
 import shutil
 import tempfile
-from inspect import signature
 
 import numpy as np
 import pyarrow as pa
@@ -31,42 +30,6 @@ from hats_import.catalog.file_readers import InputReader, ParquetPyarrowReader
 from hats_import.pipeline import pipeline_with_client
 
 LOGGER = logging.getLogger(__name__)
-
-
-@contextlib.contextmanager
-def numpy_unique_sorted_compat():
-    """Backfill ``np.unique(sorted=...)`` for older NumPy versions."""
-
-    if "sorted" in signature(np.unique).parameters:
-        yield
-        return
-
-    original_unique = np.unique
-
-    def compat_unique(
-        ar,
-        return_index=False,
-        return_inverse=False,
-        return_counts=False,
-        axis=None,
-        *,
-        equal_nan=True,
-        sorted=True,
-    ):
-        return original_unique(
-            ar,
-            return_index=return_index,
-            return_inverse=return_inverse,
-            return_counts=return_counts,
-            axis=axis,
-            equal_nan=equal_nan,
-        )
-
-    np.unique = compat_unique
-    try:
-        yield
-    finally:
-        np.unique = original_unique
 
 
 def to_native_endian(array: np.ndarray) -> np.ndarray:
@@ -126,12 +89,10 @@ def _client_ctx(client: Client | None, n_workers: int, debug: bool):
     if client is not None:
         yield client
         return
-
     if debug:
-        kwargs = {"n_workers": 1, "threads_per_worker": 1, "processes": False, "dashboard_address": None}
+        kwargs = {"n_workers": 1, "threads_per_worker": 1, "processes": False}
     else:
-        kwargs = {"n_workers": n_workers, "threads_per_worker": 1, "dashboard_address": None}
-
+        kwargs = {"n_workers": n_workers, "threads_per_worker": 1}
     with Client(**kwargs) as c:
         yield c
 
@@ -195,9 +156,8 @@ def write_hats(
             )
             .add_margin(margin_threshold=margin_threshold_arcsec, is_default=True)
         )
-        with numpy_unique_sorted_compat():
-            with _client_ctx(client, n_workers, debug) as c:
-                pipeline_with_client(import_args, c)
+        with _client_ctx(client, n_workers, debug) as c:
+            pipeline_with_client(import_args, c)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -284,9 +244,8 @@ def write_hats_from_parquet_dir(
             )
             .add_margin(margin_threshold=margin_threshold_arcsec, is_default=True)
         )
-        with numpy_unique_sorted_compat():
-            with _client_ctx(client, n_workers, debug) as c:
-                pipeline_with_client(import_args, c)
+        with _client_ctx(client, n_workers, debug) as c:
+            pipeline_with_client(import_args, c)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 

@@ -15,6 +15,7 @@ from astropy import units as u
 from astropy.io import fits
 from astropy.table import Table, join
 from cdshealpix import lonlat_to_healpix
+from dask.distributed import Client
 
 from mmu.cone import apply_cone_filter
 from mmu.hats_configs import DATASETS, MMU_V2_HATS_ROOT
@@ -438,6 +439,21 @@ def _prepare_work_dir(work_dir: str | None) -> tuple[str, bool]:
     return tempfile.mkdtemp(prefix="manga_hats_shards_"), True
 
 
+def _make_hats_client(debug: bool, workers: int) -> Client:
+    if debug:
+        return Client(
+            n_workers=1,
+            threads_per_worker=1,
+            processes=False,
+            dashboard_address=None,
+        )
+    return Client(
+        n_workers=workers,
+        threads_per_worker=1,
+        dashboard_address=None,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw-root", default=DATASETS[CATALOG_NAME].raw_path)
@@ -537,14 +553,16 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         print(f"\nBuilt {len(parquet_files)} parquet shard(s) for {processed} MaNGA targets")
-        catalog_dir = write_hats_from_parquet_dir(
-            work_dir,
-            output_path=args.output_root,
-            catalog_name=CATALOG_NAME,
-            pixel_threshold=args.pixel_threshold,
-            n_workers=args.workers,
-            debug=args.debug,
-        )
+        with _make_hats_client(args.debug, args.workers) as client:
+            catalog_dir = write_hats_from_parquet_dir(
+                work_dir,
+                output_path=args.output_root,
+                catalog_name=CATALOG_NAME,
+                pixel_threshold=args.pixel_threshold,
+                n_workers=args.workers,
+                debug=args.debug,
+                client=client,
+            )
         print(f"Done: {catalog_dir}")
         if cleanup_work_dir and not args.keep_work_dir:
             shutil.rmtree(work_dir, ignore_errors=True)
