@@ -8,19 +8,23 @@
 #   1. Clone the repo on Candide if you haven't already:
 #        git clone <repo-url> /n03data/huertas/python/MultimodalUniverse
 #
-#   2. Install missing dependencies into your conda env (one-time).
-#      DO NOT use "pip install -e ." — the repo's git tag and Python 3.10
-#      both break setuptools_scm.  Install only what is missing instead:
+#   2. Create a Python 3.11 conda env and install dependencies (one-time).
+#      hats/hats-import/lsdb all require Python >=3.11; the cosmos_visual
+#      env (Python 3.10) cannot satisfy them.
 #
 #        source /n03data/huertas/python/miniconda3/etc/profile.d/conda.sh
-#        conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual
+#        conda create -y -p /n03data/huertas/python/miniconda3/envs/mmu \
+#                     python=3.11
+#        conda activate /n03data/huertas/python/miniconda3/envs/mmu
 #        pip install "hats>=0.9.0" "hats-import>=0.9.0" "lsdb>=0.9.0" \
-#                    pyarrow "dask[distributed]"
+#                    pyarrow "dask[distributed]" \
+#                    astropy numpy pandas tqdm h5py healpy
 #
-#      The mmu package itself is NOT installed — PYTHONPATH (set below in the
-#      script) makes it importable directly from the repo checkout.
+#      The mmu package itself is NOT pip-installed — PYTHONPATH (set below)
+#      makes it importable directly from the repo checkout.
 #
 #   3. Edit the variables in the "── Configuration ──" block below.
+#      CONDA_ENV is already set to the new mmu env.
 #
 #   4. Submit:
 #        sbatch scripts/slurm/run_cosmos_candide.sh
@@ -54,7 +58,7 @@ REPO_DIR=/n03data/huertas/python/MultimodalUniverse
 
 # Conda environment that has mmu + its dependencies installed (see Quick start).
 CONDA_ROOT=/n03data/huertas/python/miniconda3
-CONDA_ENV=${CONDA_ROOT}/envs/cosmos_visual
+CONDA_ENV=${CONDA_ROOT}/envs/mmu   # Python 3.11 env; see Quick start step 2
 
 # Where to write the finished HATS catalog.
 OUTPUT_ROOT=/n03data/huertas/mmu/cosmos
