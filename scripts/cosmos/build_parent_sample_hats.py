@@ -6,7 +6,7 @@ JWST filters only (as specified in make_stamps.py):
 
 Selection: 0 < MAG_MODEL_F277W < 27
 
-Data layout on the Flatiron n17/n03 filesystem:
+Data layout on the Candide n17/n03 filesystem:
     Catalog: /n03data/huertas/COSMOS-Web/cats/
              COSMOSWeb_master_v3.1.0-sersic-cgs_err-calib_LePhare.fits
     NIRCam:  /n17data/shuntov/COSMOS-Web/Images_NIRCam/v0.8/

@@ -44,18 +44,18 @@
 # Edit these paths to match your setup on Candide.
 
 # Where the MultimodalUniverse repo lives on the cluster.
-REPO_DIR=/n03data/huertas/python/MultimodalUniverse-1
+REPO_DIR=/n03data/huertas/python/MultimodalUniverse
 
 # Conda environment that has mmu + its dependencies installed (see Quick start).
 CONDA_ROOT=/n03data/huertas/python/miniconda3
 CONDA_ENV=${CONDA_ROOT}/envs/cosmos_visual
 
 # Where to write the finished HATS catalog.
-OUTPUT_ROOT=/n03data/huertas/MultimodalUniverse_hats/cosmos
+OUTPUT_ROOT=/n03data/huertas/mmu/cosmos
 
 # Scratch directory for intermediate per-tile parquet shards (~500 MB total).
 # Must be writable and on a shared filesystem (survives between steps).
-SCRATCH_DIR=/n03data/huertas/MultimodalUniverse_hats/cosmos_scratch
+SCRATCH_DIR=/n03data/huertas/mmu/cosmos_scratch
 
 # Input data paths (defaults already match the Candide/Flatiron server layout;
 # change only if your mounts differ).
