@@ -93,6 +93,7 @@ PORTED = [
     "ps1_sne_ia",  # Pan-STARRS1 SNe Ia (~369 SNe)
     "des_y3_sne_ia",  # DES Y3 SNe Ia (~251 SNe)
     "swift_sne_ia",   # Swift UV/optical SNe Ia (~117 SNe)
+    "cosmos",         # COSMOS-Web NIRCam+MIRI, 5 JWST bands, F277W<27
 ]
 
 
@@ -686,6 +687,25 @@ rule build_swift_sne_ia:
     resources:
         mem_mb = 50_000,
         runtime = 60,
+        cpus_per_task = 96,
+        slurm_partition = SLURM_PARTITION,
+        qos = slurm_qos(SLURM_PARTITION),
+    shell:
+        "{params.cmd}"
+
+
+rule build_cosmos:
+    output:
+        marker = catalog_marker("cosmos"),
+    input:
+        script = build_script("cosmos"),
+    params:
+        cmd = build_command("cosmos"),
+    resources:
+        # 20 tiles × 5 FITS mosaics; Pool(4) workers each hold ~2–10 GB
+        # of memory-mapped image data + cutout buffers.
+        mem_mb   = 400_000,
+        runtime  = 480,           # 8 h; large tiles may take ~20 min each
         cpus_per_task = 96,
         slurm_partition = SLURM_PARTITION,
         qos = slurm_qos(SLURM_PARTITION),

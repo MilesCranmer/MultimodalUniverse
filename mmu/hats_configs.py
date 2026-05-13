@@ -81,6 +81,12 @@ DATASETS: dict[str, DatasetConfig] = {
 
     # --- IFU ---
     "manga":        DatasetConfig("manga", "ifu", "manga"),
+
+    # --- COSMOS-Web ---
+    # Raw data lives on the Flatiron n17/n03 servers, not under RAW_DATA_ROOT.
+    # The build script uses its own --catalog-path / --nircam-root / --miri-root
+    # args; raw_path here is a placeholder only.
+    "cosmos": DatasetConfig("cosmos", "image", "COSMOS-Web"),
 }
 
 
