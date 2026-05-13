@@ -38,14 +38,14 @@
 #   NIRCam at 30 mas → ~20k×20k px → ~1.6 GB per filter in RAM.
 #   MIRI at 60 mas   → ~10k×10k px → ~0.4 GB.
 #   Peak per worker  ≈ 4×1.6 + 0.4 ≈ 7 GB.
-#   Pool(4) workers  → ~28 GB + Python/PyArrow overhead → 64 GB safe.
+#   Pool(4) workers  → images ~56 GB + chunked table build ~4 GB → 128 GB safe.
 #   Increase --mem and --num-processes together if you want faster throughput.
 
 #SBATCH --job-name=cosmos_hats
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 #SBATCH --time=12:00:00
 # No --nodelist or --partition: SLURM picks any available node.
 # Add e.g.  #SBATCH --partition=htc  if your cluster requires a partition name.

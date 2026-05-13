@@ -39,6 +39,7 @@ Schema::
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 import shutil
 import sys
@@ -98,6 +99,11 @@ MAG_CUT        = 27.0
 
 # All 20 COSMOS-Web tiles from make_stamps.py
 ALL_TILES = [f"A{i}" for i in range(1, 11)] + [f"B{i}" for i in range(1, 11)]
+
+# Objects per parquet chunk written during tile processing.  Keeping this
+# small limits peak RAM: the intermediate nested-Python-list representation
+# of one chunk is ~2×CHUNK_SIZE×5×96×96×24 bytes ≈ 1.1 GB at 500 objects.
+CHUNK_SIZE = 500
 
 # Catalog scalar columns written to HATS. Subset the caller knows exist in
 # the COSMOSWeb v3.1.0 catalog. Missing columns are silently skipped.
@@ -221,8 +227,34 @@ def _decode_bytes(v) -> str:
     return v.decode().strip() if isinstance(v, (bytes, np.bytes_)) else str(v).strip()
 
 
+def _flush_chunk(
+    chunk: list[dict],
+    tile: str,
+    chunk_idx: int,
+    scratch_dir: str,
+    float_features: list[str],
+) -> int:
+    """Write one chunk of records to a parquet file and return the row count."""
+    path = os.path.join(scratch_dir, f"cosmos_{tile}_{chunk_idx:04d}.parquet")
+    table = _build_table(chunk, float_features)
+    tmp = path + ".tmp"
+    pq.write_table(table, tmp)
+    os.rename(tmp, path)
+    n = table.num_rows
+    del table
+    return n
+
+
 def _process_tile(args: tuple) -> tuple[str, int, str | None]:
     """Pool worker: build all object records for one COSMOS-Web tile.
+
+    Records are flushed to parquet every CHUNK_SIZE objects so the
+    intermediate nested-Python-list representation in _build_table never
+    exceeds ~1 GB per worker regardless of tile size.
+
+    A ``cosmos_{tile}.done`` sentinel is written on success; its presence
+    on the next run causes the tile to be skipped and its rows re-counted
+    from the existing chunk files.
 
     Input tuple::
         (tile, tile_rows, nircam_root, miri_root, scratch_dir,
@@ -233,18 +265,26 @@ def _process_tile(args: tuple) -> tuple[str, int, str | None]:
     (tile, tile_rows, nircam_root, miri_root, scratch_dir,
      float_features, ra_center, dec_center, radius) = args
 
-    out_path = os.path.join(scratch_dir, f"cosmos_{tile}.parquet")
-    if os.path.exists(out_path):
-        n = pq.read_metadata(out_path).num_rows
+    done_marker = os.path.join(scratch_dir, f"cosmos_{tile}.done")
+    if os.path.exists(done_marker):
+        existing = sorted(glob.glob(os.path.join(scratch_dir, f"cosmos_{tile}_*.parquet")))
+        n = sum(pq.read_metadata(p).num_rows for p in existing)
         return tile, n, "already done"
+
+    # Remove any partial chunks from a previous failed run so we don't
+    # accumulate duplicate rows on retry.
+    for stale in glob.glob(os.path.join(scratch_dir, f"cosmos_{tile}_*.parquet")):
+        os.remove(stale)
 
     try:
         images = _load_tile_images(tile, nircam_root, miri_root)
         if images is None:
             return tile, 0, "missing image files"
 
-        records: list[dict] = []
-        n_cat = len(tile_rows)
+        chunk:      list[dict] = []
+        chunk_idx  = 0
+        total      = 0
+        n_cat      = len(tile_rows)
 
         for ri in range(n_cat):
             row = tile_rows[ri]
@@ -303,21 +343,27 @@ def _process_tile(args: tuple) -> tuple[str, int, str | None]:
                     record[feat] = np.float32(v) if v is not np.ma.masked else np.float32(0.0)
                 except (KeyError, TypeError):
                     record[feat] = np.float32(0.0)
-            records.append(record)
+            chunk.append(record)
+
+            if len(chunk) >= CHUNK_SIZE:
+                total += _flush_chunk(chunk, tile, chunk_idx, scratch_dir, float_features)
+                chunk_idx += 1
+                chunk = []
 
             if (ri + 1) % 2000 == 0 or ri == n_cat - 1:
-                print(f"  [{tile}] {ri+1}/{n_cat} → {len(records)} cutouts", flush=True)
+                print(f"  [{tile}] {ri+1}/{n_cat} → {total + len(chunk)} cutouts",
+                      flush=True)
 
-        if not records:
+        # Flush the final partial chunk.
+        if chunk:
+            total += _flush_chunk(chunk, tile, chunk_idx, scratch_dir, float_features)
+
+        if total == 0:
             return tile, 0, "no cutouts produced"
 
-        table = _build_table(records, float_features)
-        tmp = out_path + ".tmp"
-        pq.write_table(table, tmp)
-        os.rename(tmp, out_path)
-        n = table.num_rows
-        del records, table
-        return tile, n, None
+        # Mark tile as fully done so reruns skip it.
+        open(done_marker, "w").close()
+        return tile, total, None
 
     except (KeyboardInterrupt, SystemExit):
         raise
