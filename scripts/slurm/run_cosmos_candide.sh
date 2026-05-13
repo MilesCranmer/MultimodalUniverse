@@ -99,7 +99,7 @@ cd ${REPO_DIR}
 
 # ── Dependency check ─────────────────────────────────────────────────────────
 python - <<'EOF'
-import importlib, sys
+import importlib.util, sys
 missing = [pkg for pkg in ("hats", "lsdb", "pyarrow", "astropy", "dask")
            if importlib.util.find_spec(pkg) is None]
 if missing:
