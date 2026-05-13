@@ -6,13 +6,19 @@
 #
 # ── Quick start ──────────────────────────────────────────────────────────────
 #   1. Clone the repo on Candide if you haven't already:
-#        git clone <repo-url> /n03data/huertas/python/MultimodalUniverse-1
+#        git clone <repo-url> /n03data/huertas/python/MultimodalUniverse
 #
-#   2. Install mmu dependencies into your conda env (one-time):
+#   2. Install missing dependencies into your conda env (one-time).
+#      DO NOT use "pip install -e ." — the repo's git tag and Python 3.10
+#      both break setuptools_scm.  Install only what is missing instead:
+#
 #        source /n03data/huertas/python/miniconda3/etc/profile.d/conda.sh
 #        conda activate /n03data/huertas/python/miniconda3/envs/cosmos_visual
-#        pip install -e /n03data/huertas/python/MultimodalUniverse-1[dev]
-#      (or create a fresh env:  conda create -n mmu python=3.11 && pip install -e .[dev])
+#        pip install "hats>=0.9.0" "hats-import>=0.9.0" "lsdb>=0.9.0" \
+#                    pyarrow "dask[distributed]"
+#
+#      The mmu package itself is NOT installed — PYTHONPATH (set below in the
+#      script) makes it importable directly from the repo checkout.
 #
 #   3. Edit the variables in the "── Configuration ──" block below.
 #
