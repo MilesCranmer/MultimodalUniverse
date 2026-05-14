@@ -221,6 +221,7 @@ def write_hats_from_parquet_dir(
     n_workers: int = 32,
     debug: bool = False,
     client: Client | None = None,
+    tmp_dir: str | None = None,
 ) -> str:
     """Write a HATS catalog by streaming parquet files from a directory.
 
@@ -291,13 +292,15 @@ def write_hats_from_parquet_dir(
         )
         shutil.rmtree(inner_catalog)
 
-    tmp_dir = tempfile.mkdtemp(prefix=f"hats_import_{catalog_name}_")
+    if tmp_dir is not None:
+        os.makedirs(tmp_dir, exist_ok=True)
+    ingest_tmp = tempfile.mkdtemp(prefix=f"hats_import_{catalog_name}_", dir=tmp_dir)
     try:
         import_args = (
             CollectionArguments(
                 output_artifact_name=catalog_name,
                 output_path=output_path,
-                tmp_dir=tmp_dir,
+                tmp_dir=ingest_tmp,
             )
             .catalog(
                 input_file_list=parquet_files,
@@ -312,6 +315,6 @@ def write_hats_from_parquet_dir(
         with _client_ctx(client, n_workers, debug) as c:
             pipeline_with_client(import_args, c)
     finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        shutil.rmtree(ingest_tmp, ignore_errors=True)
 
     return os.path.join(output_path, catalog_name, catalog_name)

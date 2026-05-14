@@ -510,6 +510,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--pixel-threshold", type=int, default=8192)
     parser.add_argument("--ingest-workers",  type=int, default=8)
+    parser.add_argument(
+        "--tmp-dir",
+        default=None,
+        help="Parent directory for hats-import's intermediate files. "
+             "Defaults to the system /tmp, which may be too small on "
+             "cluster nodes. Set to a path on a large shared filesystem "
+             "(e.g. the same parent as --scratch-dir).",
+    )
     parser.add_argument("--ra-center",  type=float, default=None)
     parser.add_argument("--dec-center", type=float, default=None)
     parser.add_argument("--radius",     type=float, default=None,
@@ -613,6 +621,7 @@ def main(argv: list[str] | None = None) -> int:
             pixel_threshold=args.pixel_threshold,
             n_workers=args.ingest_workers,
             debug=False,
+            tmp_dir=args.tmp_dir,
         )
         print(f"Done: {catalog_dir}", flush=True)
 

@@ -67,6 +67,10 @@ OUTPUT_ROOT=/n03data/huertas/mmu/cosmos
 # Must be writable and on a shared filesystem (survives between steps).
 SCRATCH_DIR=/n03data/huertas/mmu/cosmos_scratch
 
+# Temporary directory for hats-import intermediate files (SPLITTING stage).
+# /tmp on compute nodes is too small; redirect to a large shared filesystem.
+HATS_TMP_DIR=/n03data/huertas/mmu/hats_tmp
+
 # Input data paths (defaults already match the Candide/Flatiron server layout;
 # change only if your mounts differ).
 CATALOG_PATH=/n03data/huertas/COSMOS-Web/cats/COSMOSWeb_master_v3.1.0-sersic-cgs_err-calib_LePhare.fits
@@ -111,7 +115,7 @@ EOF
 if [ $? -ne 0 ]; then exit 1; fi
 
 # ── Create output dirs ────────────────────────────────────────────────────────
-mkdir -p "${OUTPUT_ROOT}" "${SCRATCH_DIR}"
+mkdir -p "${OUTPUT_ROOT}" "${SCRATCH_DIR}" "${HATS_TMP_DIR}"
 
 # Redirect SLURM output now that OUTPUT_ROOT exists.
 # (The #SBATCH directives above write to the submission directory by default;
@@ -129,6 +133,7 @@ echo "  nircam root: ${NIRCAM_ROOT}"
 echo "  miri root:   ${MIRI_ROOT}"
 echo "  output:      ${OUTPUT_ROOT}"
 echo "  scratch:     ${SCRATCH_DIR}"
+echo "  hats tmp:    ${HATS_TMP_DIR}"
 echo "  workers:     ${NUM_PROCESSES}"
 echo
 
@@ -138,6 +143,7 @@ python -u -m scripts.cosmos.build_parent_sample_hats \
     --miri-root      "${MIRI_ROOT}"     \
     --output-root    "${OUTPUT_ROOT}"   \
     --scratch-dir    "${SCRATCH_DIR}"   \
+    --tmp-dir        "${HATS_TMP_DIR}"  \
     --num-processes  ${NUM_PROCESSES}   \
     --ingest-workers ${INGEST_WORKERS}
 
