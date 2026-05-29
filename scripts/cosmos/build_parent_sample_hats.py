@@ -25,8 +25,8 @@ Schema::
 
     image: struct<
         band:     list<string>,                    # 5 entries per row
-        flux:     list<list<list<float32>>>,       # (5, 96, 96)
-        ivar:     list<list<list<float32>>>,       # (5, 96, 96); synthetic if no wht
+        flux:     list<list<list<float32>>>,       # (5, 160, 160)
+        ivar:     list<list<list<float32>>>,       # (5, 160, 160); synthetic if no wht
         mask:     list<list<list<bool>>>,          # True = valid pixel
         psf_fwhm: list<float32>,                   # arcsec per band
         scale:    list<float32>,                   # arcsec/pix per band
@@ -68,7 +68,7 @@ DEFAULT_CATALOG_PATH = (
 DEFAULT_NIRCAM_ROOT = "/n17data/shuntov/COSMOS-Web/Images_NIRCam/v0.8"
 DEFAULT_MIRI_ROOT   = "/n17data/shuntov/COSMOS-Web/Images_MIRI/Full_v0.7"
 
-IMAGE_SIZE = 96  # pixels, fixed for all bands
+IMAGE_SIZE = 160  # pixels, fixed for all bands
 
 # JWST filters to include (F770W is MIRI; the rest are NIRCam).
 FILTERS = ["F115W", "F150W", "F277W", "F444W", "F770W"]
@@ -102,7 +102,7 @@ ALL_TILES = [f"A{i}" for i in range(1, 11)] + [f"B{i}" for i in range(1, 11)]
 
 # Objects per parquet chunk written during tile processing.  Keeping this
 # small limits peak RAM: the intermediate nested-Python-list representation
-# of one chunk is ~2×CHUNK_SIZE×5×96×96×24 bytes ≈ 1.1 GB at 500 objects.
+# of one chunk is ~2×CHUNK_SIZE×5×160×160×24 bytes ≈ 3.1 GB at 500 objects.
 CHUNK_SIZE = 500
 
 # Catalog scalar columns written to HATS. Subset the caller knows exist in
