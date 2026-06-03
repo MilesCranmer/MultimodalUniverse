@@ -544,7 +544,7 @@ def _read_image_table(path: Path, extra_columns: Sequence[str] = ()) -> dict[str
     table = pq.read_table(path, columns=list(dict.fromkeys(read_cols)))
     result: dict[str, pa.Array] = {}
     for name in table.schema.names:
-        col = table.column(name)
+        col = table.column(name).combine_chunks()
         if pa.types.is_struct(col.type) and name == "image":
             for i in range(col.type.num_fields):
                 f = col.type.field(i)

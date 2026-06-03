@@ -120,7 +120,7 @@ for path in parquet_files:
         print(f"  skipping {path}: {exc}")
         continue
 
-    flux_col = table.column("image").field("flux")
+    flux_col = table.column("image").combine_chunks().field("flux")
     obj_col  = table.column("object_id")
     mag_col  = table.column("MAG_MODEL_F277W")
 
