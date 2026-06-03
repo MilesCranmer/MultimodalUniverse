@@ -38,7 +38,7 @@ HATS_CATALOG=/n03data/huertas/mmu/cosmos/cosmos/cosmos
 OUT_DIR=/n03data/huertas/mmu/cosmos/validation
 
 # Number of random objects to visualise.
-N_SAMPLE=64
+N_SAMPLE=500
 
 # Number of objects in the multi-band strip.
 N_STRIP=10
@@ -87,7 +87,7 @@ import pyarrow.parquet as pq
 sys.path.insert(0, "${REPO_DIR}")
 import matplotlib
 matplotlib.use("Agg")
-from scripts.cosmos.validation.viusalize import plot_all_modalities, plot_multiband_strip
+from scripts.cosmos.validation.viusalize import plot_all_modalities, plot_multiband_strip, plot_multiband_mag_bins
 
 hats_catalog = "${HATS_CATALOG}"
 out_dir      = "${OUT_DIR}"
@@ -153,14 +153,14 @@ plot_all_modalities(
     dpi=180,
 )
 
-# ── Plot multi-band strip ──────────────────────────────────────────────────
-print("Plotting multi-band strips (bright + faint) …")
-plot_multiband_strip(
+# ── Plot per-magnitude-bin strips ─────────────────────────────────────────
+print("Plotting per-magnitude-bin strips …")
+plot_multiband_mag_bins(
     rows,
-    n_objects=min(n_strip, len(rows)),
+    mag_col="MAG_MODEL_F277W",
+    mag_bins=[(lo, lo + 1) for lo in range(20, 27)],
+    n_per_bin=n_strip,
     object_id_col="object_id",
-    sort_by="MAG_MODEL_F277W",
-    faint_page=True,
     show=False,
     save=True,
     save_dir=out_dir,

@@ -290,6 +290,77 @@ def plot_multiband_strip(
 
 
 # ---------------------------------------------------------------------------
+# Per-magnitude-bin strips
+# ---------------------------------------------------------------------------
+
+
+def plot_multiband_mag_bins(
+    df,
+    image_col: str = "image_flux",
+    object_id_col: str = "object_id",
+    mag_col: str = "MAG_MODEL_F277W",
+    mag_bins: list | None = None,
+    n_per_bin: int = 5,
+    figsize_scale: float = 2.0,
+    show: bool = True,
+    save: bool = False,
+    save_dir: str | Path | None = None,
+    dpi: int = 180,
+) -> list:
+    """Produce one multiband strip figure per magnitude bin.
+
+    Args:
+        mag_bins: List of (lo, hi) tuples. Defaults to 1-mag bins from 20 to 27.
+        n_per_bin: Max objects to show per bin (brightest within bin first).
+        mag_col: Column used for binning and labelling.
+
+    Returns:
+        List of (lo, hi, fig, axs) for each non-empty bin.
+    """
+    if mag_bins is None:
+        mag_bins = [(lo, lo + 1) for lo in range(20, 27)]
+
+    rows = list(df.iloc[:] if hasattr(df, "iloc") else df)
+    col_short = mag_col.replace("MAG_MODEL_", "")
+
+    save_path = None
+    if save:
+        if save_dir is None:
+            raise ValueError("save_dir must be provided when save=True.")
+        save_path = Path(save_dir)
+        save_path.mkdir(parents=True, exist_ok=True)
+
+    results = []
+    for lo, hi in mag_bins:
+        bin_rows = [
+            r for r in rows
+            if (r.get(mag_col) if isinstance(r, dict) else getattr(r, mag_col, None)) is not None
+            and lo <= (r[mag_col] if isinstance(r, dict) else getattr(r, mag_col)) < hi
+        ]
+        bin_rows.sort(key=lambda r: r[mag_col] if isinstance(r, dict) else getattr(r, mag_col))
+        bin_rows = bin_rows[:n_per_bin]
+
+        if not bin_rows:
+            print(f"  [{lo}, {hi}): no objects in pool — skipping")
+            continue
+
+        fig, axs = _draw_strip(
+            bin_rows, image_col, object_id_col, mag_col, figsize_scale,
+            title=f"COSMOS-Web — {col_short} in [{lo}, {hi})  (n={len(bin_rows)})",
+        )
+        results.append((lo, hi, fig, axs))
+
+        if save_path is not None:
+            fname = f"multiband_strip_{col_short}_{lo:04.1f}_{hi:04.1f}.png".replace(".", "p")
+            fig.savefig(save_path / fname, dpi=dpi, bbox_inches="tight")
+            print(f"  [{lo}, {hi}): wrote {save_path / fname}")
+
+    if show:
+        plt.show()
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Combined visualisation
 # ---------------------------------------------------------------------------
 
