@@ -46,6 +46,7 @@ HIST_SPECS=(
     "MAG_MODEL_F277W"
     "MAG_MODEL_F444W"
     "MAG_MODEL_F115W"
+    "ZPHOT"
     "RADIUS:log10"
     "AXRATIO"
 )
@@ -59,6 +60,7 @@ BIN_SPECS=(
 LABEL_COLS=(
     "object_id"
     "MAG_MODEL_F277W"
+    "ZPHOT"
 )
 
 # Random cutouts per grid.

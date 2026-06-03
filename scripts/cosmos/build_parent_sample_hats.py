@@ -115,6 +115,10 @@ FLOAT_FEATURES = [
     "MAG_MODEL_F277W",
     "MAG_MODEL_F444W",
     "MAG_MODEL_F770W",
+    "ZPHOT",           # LePhare best photometric redshift
+    "ZSPEC",           # spectroscopic redshift (-99 if unavailable)
+    "ZPHOT_L68",       # 68% lower confidence bound on ZPHOT
+    "ZPHOT_U68",       # 68% upper confidence bound on ZPHOT
 ]
 
 
