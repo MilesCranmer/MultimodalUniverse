@@ -202,6 +202,7 @@ def plot_multiband_strip(
     df,
     image_col: str = "image_flux",
     object_id_col: str = "object_id",
+    sort_by: str | None = "MAG_MODEL_F277W",
     n_objects: int = 8,
     figsize_scale: float = 2.0,
     show: bool = True,
@@ -212,17 +213,37 @@ def plot_multiband_strip(
     """Plot a strip with one row per object and one column per JWST band.
 
     Args:
+        sort_by: Column name to sort rows by (ascending). If the column is
+            a magnitude, this puts the brightest objects at the top. Pass
+            None to keep the original order.
         n_objects: Number of objects to show (rows in the figure).
     """
-    n = min(len(df), n_objects)
+    rows = list(df.iloc[:] if hasattr(df, "iloc") else df)
+
+    if sort_by is not None:
+        try:
+            rows = sorted(rows, key=lambda r: (r[sort_by] is None, r[sort_by]))
+        except (KeyError, TypeError):
+            pass  # column absent or not sortable — keep original order
+
+    n = min(len(rows), n_objects)
     n_bands = len(COSMOS_BANDS)
     fig, axs = plt.subplots(n, n_bands, figsize=(n_bands * figsize_scale, n * figsize_scale))
     axs = np.atleast_2d(axs)
 
     for row_idx in range(n):
-        row = df.iloc[row_idx] if hasattr(df, "iloc") else df[row_idx]
+        row = rows[row_idx]
         obj_id = _safe_object_id(row, object_id_col)
         arr = row[image_col]
+
+        # Build row label: object_id + magnitude if available
+        label = str(obj_id)
+        if sort_by is not None:
+            mag_val = row.get(sort_by) if isinstance(row, dict) else getattr(row, sort_by, None)
+            if mag_val is not None:
+                col_short = sort_by.replace("MAG_MODEL_", "")
+                label = f"{obj_id}\n{col_short}={float(mag_val):.2f}"
+
         for col_idx, band in enumerate(COSMOS_BANDS):
             ax = axs[row_idx, col_idx]
             try:
@@ -233,9 +254,9 @@ def plot_multiband_strip(
             if row_idx == 0:
                 ax.set_title(band, fontsize=9)
             if col_idx == 0:
-                ax.set_ylabel(str(obj_id), fontsize=7, rotation=0, labelpad=40, va="center")
+                ax.set_ylabel(label, fontsize=7, rotation=0, labelpad=55, va="center")
 
-    fig.suptitle(f"COSMOS-Web 5-band strips (n={n})", fontsize=11)
+    fig.suptitle(f"COSMOS-Web 5-band strips — sorted by {sort_by} (n={n})", fontsize=11)
     fig.tight_layout()
 
     if save:
