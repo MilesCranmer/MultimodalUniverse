@@ -254,7 +254,11 @@ def plot_multiband_strip(
             if row_idx == 0:
                 ax.set_title(band, fontsize=9)
             if col_idx == 0:
-                ax.set_ylabel(label, fontsize=7, rotation=0, labelpad=55, va="center")
+                ax.text(
+                    -0.05, 0.5, label,
+                    transform=ax.transAxes,
+                    fontsize=7, ha="right", va="center",
+                )
 
     fig.suptitle(f"COSMOS-Web 5-band strips — sorted by {sort_by} (n={n})", fontsize=11)
     fig.tight_layout()
