@@ -198,52 +198,21 @@ def plot_rgb_from_df(
 # ---------------------------------------------------------------------------
 
 
-def plot_multiband_strip(
-    df,
-    image_col: str = "image_flux",
-    object_id_col: str = "object_id",
-    sort_by: str | None = "MAG_MODEL_F277W",
-    n_objects: int = 8,
-    figsize_scale: float = 2.0,
-    show: bool = True,
-    save: bool = False,
-    save_dir: str | Path | None = None,
-    dpi: int = 180,
-) -> tuple:
-    """Plot a strip with one row per object and one column per JWST band.
-
-    Args:
-        sort_by: Column name to sort rows by (ascending). If the column is
-            a magnitude, this puts the brightest objects at the top. Pass
-            None to keep the original order.
-        n_objects: Number of objects to show (rows in the figure).
-    """
-    rows = list(df.iloc[:] if hasattr(df, "iloc") else df)
-
-    if sort_by is not None:
-        try:
-            rows = sorted(rows, key=lambda r: (r[sort_by] is None, r[sort_by]))
-        except (KeyError, TypeError):
-            pass  # column absent or not sortable — keep original order
-
-    n = min(len(rows), n_objects)
+def _draw_strip(rows: list, image_col: str, object_id_col: str, sort_by: str | None, figsize_scale: float, title: str):
+    """Create one multiband strip figure from a pre-selected list of rows."""
+    n = len(rows)
     n_bands = len(COSMOS_BANDS)
     fig, axs = plt.subplots(n, n_bands, figsize=(n_bands * figsize_scale, n * figsize_scale))
     axs = np.atleast_2d(axs)
-
-    for row_idx in range(n):
-        row = rows[row_idx]
+    for row_idx, row in enumerate(rows):
         obj_id = _safe_object_id(row, object_id_col)
         arr = row[image_col]
-
-        # Build row label: object_id + magnitude if available
         label = str(obj_id)
         if sort_by is not None:
             mag_val = row.get(sort_by) if isinstance(row, dict) else getattr(row, sort_by, None)
             if mag_val is not None:
                 col_short = sort_by.replace("MAG_MODEL_", "")
                 label = f"{obj_id}\n{col_short}={float(mag_val):.2f}"
-
         for col_idx, band in enumerate(COSMOS_BANDS):
             ax = axs[row_idx, col_idx]
             try:
@@ -254,25 +223,70 @@ def plot_multiband_strip(
             if row_idx == 0:
                 ax.set_title(band, fontsize=9)
             if col_idx == 0:
-                ax.text(
-                    -0.05, 0.5, label,
-                    transform=ax.transAxes,
-                    fontsize=7, ha="right", va="center",
-                )
-
-    fig.suptitle(f"COSMOS-Web 5-band strips — sorted by {sort_by} (n={n})", fontsize=11)
+                ax.text(-0.05, 0.5, label, transform=ax.transAxes, fontsize=7, ha="right", va="center")
+    fig.suptitle(title, fontsize=11)
     fig.tight_layout()
+    return fig, axs
+
+
+def plot_multiband_strip(
+    df,
+    image_col: str = "image_flux",
+    object_id_col: str = "object_id",
+    sort_by: str | None = "MAG_MODEL_F277W",
+    n_objects: int = 8,
+    faint_page: bool = True,
+    figsize_scale: float = 2.0,
+    show: bool = True,
+    save: bool = False,
+    save_dir: str | Path | None = None,
+    dpi: int = 180,
+) -> tuple:
+    """Plot multiband strips sorted by magnitude, with optional faint-end page.
+
+    Args:
+        sort_by: Column to sort by ascending (brightest = smallest value first).
+            Pass None to keep original order.
+        n_objects: Rows per page.
+        faint_page: If True, also produce a second figure with the faintest
+            n_objects rows (saved as multiband_strip_faint.png).
+    """
+    rows = list(df.iloc[:] if hasattr(df, "iloc") else df)
+
+    if sort_by is not None:
+        try:
+            rows = sorted(rows, key=lambda r: (r[sort_by] is None, r[sort_by]))
+        except (KeyError, TypeError):
+            pass
+
+    n = min(len(rows), n_objects)
+    sort_label = sort_by or "original order"
+
+    fig_bright, axs_bright = _draw_strip(
+        rows[:n], image_col, object_id_col, sort_by, figsize_scale,
+        title=f"COSMOS-Web — bright end, sorted by {sort_label} (n={n})",
+    )
+
+    fig_faint, axs_faint = None, None
+    if faint_page and len(rows) >= n:
+        faint_rows = rows[max(0, len(rows) - n):]
+        fig_faint, axs_faint = _draw_strip(
+            faint_rows, image_col, object_id_col, sort_by, figsize_scale,
+            title=f"COSMOS-Web — faint end, sorted by {sort_label} (n={len(faint_rows)})",
+        )
 
     if save:
         if save_dir is None:
             raise ValueError("save_dir must be provided when save=True.")
         path = Path(save_dir)
         path.mkdir(parents=True, exist_ok=True)
-        fig.savefig(path / "multiband_strip.png", dpi=dpi, bbox_inches="tight")
+        fig_bright.savefig(path / "multiband_strip_bright.png", dpi=dpi, bbox_inches="tight")
+        if fig_faint is not None:
+            fig_faint.savefig(path / "multiband_strip_faint.png", dpi=dpi, bbox_inches="tight")
 
     if show:
         plt.show()
-    return fig, axs
+    return (fig_bright, axs_bright, fig_faint, axs_faint)
 
 
 # ---------------------------------------------------------------------------

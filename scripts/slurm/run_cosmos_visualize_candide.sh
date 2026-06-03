@@ -154,11 +154,13 @@ plot_all_modalities(
 )
 
 # ── Plot multi-band strip ──────────────────────────────────────────────────
-print("Plotting multi-band strip …")
+print("Plotting multi-band strips (bright + faint) …")
 plot_multiband_strip(
     rows,
     n_objects=min(n_strip, len(rows)),
     object_id_col="object_id",
+    sort_by="MAG_MODEL_F277W",
+    faint_page=True,
     show=False,
     save=True,
     save_dir=out_dir,
