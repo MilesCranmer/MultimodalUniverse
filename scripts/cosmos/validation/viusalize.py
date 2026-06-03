@@ -143,7 +143,7 @@ def plot_band_from_df(
     fig,
     axs,
     image_col: str = "image_flux",
-    object_id_col: str = "obj_id",
+    object_id_col: str = "object_id",
     band: str = DEFAULT_GRAY_BAND,
     max_plots: int = 64,
 ) -> tuple:
@@ -176,7 +176,7 @@ def plot_rgb_from_df(
     fig,
     axs,
     image_col: str = "image_flux",
-    object_id_col: str = "obj_id",
+    object_id_col: str = "object_id",
     max_plots: int = 64,
 ) -> tuple:
     """Plot F444W/F277W/F115W RGB composites from dataframe rows."""
@@ -201,7 +201,7 @@ def plot_rgb_from_df(
 def plot_multiband_strip(
     df,
     image_col: str = "image_flux",
-    object_id_col: str = "obj_id",
+    object_id_col: str = "object_id",
     n_objects: int = 8,
     figsize_scale: float = 2.0,
     show: bool = True,
@@ -258,7 +258,7 @@ def plot_multiband_strip(
 def plot_all_modalities(
     df,
     max_plots: int = 64,
-    object_id_col: str = "obj_id",
+    object_id_col: str = "object_id",
     show: bool = True,
     save: bool = False,
     save_dir: str | Path | None = None,

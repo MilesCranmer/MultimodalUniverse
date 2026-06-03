@@ -114,16 +114,15 @@ for path in parquet_files:
     try:
         table = pq.read_table(
             path,
-            columns=["image", "obj_id", "MAG_MODEL_F277W", "ZPHOT"],
+            columns=["image", "object_id", "MAG_MODEL_F277W"],
         )
     except Exception as exc:
         print(f"  skipping {path}: {exc}")
         continue
 
-    flux_col  = table.column("image").field("flux")
-    obj_col   = table.column("obj_id")
-    mag_col   = table.column("MAG_MODEL_F277W")
-    zphot_col = table.column("ZPHOT")
+    flux_col = table.column("image").field("flux")
+    obj_col  = table.column("object_id")
+    mag_col  = table.column("MAG_MODEL_F277W")
 
     n_take = min(len(table), n_sample - len(rows))
     indices = rng.choice(len(table), size=n_take, replace=False)
@@ -132,10 +131,9 @@ for path in parquet_files:
         if flux_val is None:
             continue
         rows.append({
-            "image_flux":       np.asarray(flux_val, dtype=np.float32),
-            "obj_id":           obj_col[int(i)].as_py(),
-            "MAG_MODEL_F277W":  mag_col[int(i)].as_py(),
-            "ZPHOT":            zphot_col[int(i)].as_py(),
+            "image_flux":      np.asarray(flux_val, dtype=np.float32),
+            "object_id":       obj_col[int(i)].as_py(),
+            "MAG_MODEL_F277W": mag_col[int(i)].as_py(),
         })
 
 print(f"Loaded {len(rows)} objects.")
@@ -148,7 +146,7 @@ print("Plotting grayscale and RGB grids …")
 plot_all_modalities(
     rows,
     max_plots=n_sample,
-    object_id_col="obj_id",
+    object_id_col="object_id",
     show=False,
     save=True,
     save_dir=out_dir,
@@ -160,7 +158,7 @@ print("Plotting multi-band strip …")
 plot_multiband_strip(
     rows,
     n_objects=min(n_strip, len(rows)),
-    object_id_col="obj_id",
+    object_id_col="object_id",
     show=False,
     save=True,
     save_dir=out_dir,

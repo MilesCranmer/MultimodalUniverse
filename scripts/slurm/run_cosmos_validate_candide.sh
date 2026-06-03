@@ -46,8 +46,8 @@ HIST_SPECS=(
     "MAG_MODEL_F277W"
     "MAG_MODEL_F444W"
     "MAG_MODEL_F115W"
-    "ZPHOT"
     "RADIUS:log10"
+    "AXRATIO"
 )
 
 # Binned image grids: COLUMN:BIN_WIDTH:MIN:MAX.
@@ -57,9 +57,8 @@ BIN_SPECS=(
 
 # Columns shown in plot titles.
 LABEL_COLS=(
-    "obj_id"
+    "object_id"
     "MAG_MODEL_F277W"
-    "ZPHOT"
 )
 
 # Random cutouts per grid.
