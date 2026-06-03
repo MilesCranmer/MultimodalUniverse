@@ -35,7 +35,7 @@ CONDA_ENV=${CONDA_ROOT}/envs/mmu
 HATS_CATALOG=/n03data/huertas/mmu/cosmos/cosmos/cosmos
 
 # Where output PNGs are written.
-OUT_DIR=/n03data/huertas/mmu/cosmos_visualization
+OUT_DIR=/n03data/huertas/mmu/cosmos/validation
 
 # Number of random objects to visualise.
 N_SAMPLE=64

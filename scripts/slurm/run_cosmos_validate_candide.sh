@@ -39,7 +39,7 @@ CONDA_ENV=${CONDA_ROOT}/envs/mmu
 HATS_CATALOG=/n03data/huertas/mmu/cosmos/cosmos/cosmos
 
 # Where validation artifacts are written.
-OUT_DIR=/n03data/huertas/mmu/cosmos_validation
+OUT_DIR=/n03data/huertas/mmu/cosmos/validation
 
 # Histograms to generate (COLUMN or COLUMN:TRANSFORM).
 HIST_SPECS=(
