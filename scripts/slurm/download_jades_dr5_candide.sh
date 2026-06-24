@@ -9,9 +9,9 @@
 #
 # ── Sources ───────────────────────────────────────────────────────────────────
 #   GOODS-S mosaics : https://slate.ucsc.edu/~brant/jades-dr5/GOODS-S/hlsp/images/mosaics/
-#   GOODS-S PSFs    : same URL — files matching *psf* separated into psfs/
 #   GOODS-N mosaics : https://slate.ucsc.edu/~brant/jades-dr5/GOODS-N/hlsp/images/mosaics/
-#   GOODS-N PSFs    : same URL — files matching *psf* separated into psfs/
+#   GOODS-S PSFs    : https://slate.ucsc.edu/~brant/jades-dr5/GOODS-S/hlsp/images/submosaics/ (*mpsf.fits)
+#   GOODS-N PSFs    : https://slate.ucsc.edu/~brant/jades-dr5/GOODS-N/hlsp/images/submosaics/ (*mpsf.fits)
 #   GOODS-S cats    : https://slate.ucsc.edu/~brant/jades-dr5/GOODS-S/hlsp/catalogs/
 #   GOODS-N cats    : https://slate.ucsc.edu/~brant/jades-dr5/GOODS-N/hlsp/catalogs/
 #
@@ -62,37 +62,36 @@ echo "=== JADES DR5 download started $(date) ==="
 echo "  output base: ${BASE_DIR}"
 echo
 
-# ── Mosaics and PSFs ─────────────────────────────────────────────────────────
-# Both live under .../images/mosaics/. We wget the same URL twice per field:
-#   pass 1: reject PSF files  → mosaics/
-#   pass 2: accept only PSFs  → psfs/
-#
-# PSF filenames are expected to contain "psf" (case-insensitive).
+# ── Mosaics ───────────────────────────────────────────────────────────────────
 # --cut-dirs=6 strips: ~brant / jades-dr5 / GOODS-S / hlsp / images / mosaics
 
-echo "--- GOODS-S mosaics (non-PSF files) ---"
+echo "--- GOODS-S mosaics ---"
 wget ${WGET_OPTS} --cut-dirs=6 \
-     --reject-regex "(?i)psf" \
      -P "${MOSAIC_DIR}/GOODS-S" \
      "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-S/hlsp/images/mosaics/"
 
-echo "--- GOODS-S PSFs ---"
+echo "--- GOODS-N mosaics ---"
 wget ${WGET_OPTS} --cut-dirs=6 \
-     --accept-regex "(?i)psf" \
-     -P "${PSF_DIR}/GOODS-S" \
-     "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-S/hlsp/images/mosaics/"
-
-echo "--- GOODS-N mosaics (non-PSF files) ---"
-wget ${WGET_OPTS} --cut-dirs=6 \
-     --reject-regex "(?i)psf" \
      -P "${MOSAIC_DIR}/GOODS-N" \
      "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-N/hlsp/images/mosaics/"
 
-echo "--- GOODS-N PSFs ---"
+# ── PSFs ──────────────────────────────────────────────────────────────────────
+# PSFs live under .../images/submosaics/ organised in subregion subdirectories.
+# Filenames end with *mpsf.fits; only those are downloaded.
+# --cut-dirs=6 strips: ~brant / jades-dr5 / GOODS-S / hlsp / images / submosaics
+# Subregion subdirectories are preserved under psfs/GOODS-{S,N}/.
+
+echo "--- GOODS-S PSFs (*mpsf.fits from submosaics) ---"
 wget ${WGET_OPTS} --cut-dirs=6 \
-     --accept-regex "(?i)psf" \
+     -A "*mpsf.fits" \
+     -P "${PSF_DIR}/GOODS-S" \
+     "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-S/hlsp/images/submosaics/"
+
+echo "--- GOODS-N PSFs (*mpsf.fits from submosaics) ---"
+wget ${WGET_OPTS} --cut-dirs=6 \
+     -A "*mpsf.fits" \
      -P "${PSF_DIR}/GOODS-N" \
-     "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-N/hlsp/images/mosaics/"
+     "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-N/hlsp/images/submosaics/"
 
 # ── Catalogs ──────────────────────────────────────────────────────────────────
 # --cut-dirs=5 strips: ~brant / jades-dr5 / GOODS-S / hlsp / catalogs
