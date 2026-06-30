@@ -38,16 +38,40 @@ MOSAIC_DIR=${BASE_DIR}/mosaics
 PSF_DIR=${BASE_DIR}/psfs
 CAT_DIR=${BASE_DIR}/cats
 
-# wget options common to all downloads:
-#   -q           : quiet (errors still printed)
-#   -r           : recursive
-#   -np          : no parent (stay inside the listed directory)
-#   -nH          : no host prefix in output path
-#   -nc          : no-clobber (skip files already downloaded)
-#   --tries=5    : retry up to 5 times on transient errors
-#   --wait=2     : wait 2 s between requests (be polite to the server)
-#   --random-wait: randomise wait ±50% to avoid looking like a bot
-WGET_OPTS="-q -r -np -nH -nc --tries=5 --wait=2 --random-wait"
+# lftp is used instead of wget because wget -r loads the entire URL tree into
+# RAM before downloading, which exhausts memory on large JADES directory trees.
+# lftp mirror streams the listing and downloads concurrently with low overhead.
+#
+# lftp mirror options:
+#   --only-newer   : skip files already present (resume-safe)
+#   --parallel=4   : 4 concurrent transfers per mirror call
+#   --verbose      : print each downloaded file
+#   --log=FILE     : per-section transfer log
+
+# ── Helper: mirror one remote URL into a local directory ──────────────────────
+
+lftp_mirror() {
+    local remote_url="$1"
+    local local_dir="$2"
+    local include_glob="${3:-}"   # optional glob, e.g. "*mpsf.fits"
+    local log_file="${BASE_DIR}/lftp_$(basename ${local_dir}).log"
+
+    local include_opt=""
+    if [ -n "${include_glob}" ]; then
+        include_opt="--include-glob=${include_glob}"
+    fi
+
+    lftp -c "
+set net:max-retries 5
+set net:reconnect-interval-base 10
+set ftp:passive-mode yes
+open ${remote_url%/*}/
+mirror --only-newer --parallel=4 --verbose ${include_opt} \
+       --log=${log_file} \
+       $(basename ${remote_url})/ ${local_dir}/
+bye
+"
+}
 
 # ── Create output directories ─────────────────────────────────────────────────
 
@@ -63,48 +87,44 @@ echo "  output base: ${BASE_DIR}"
 echo
 
 # ── Mosaics ───────────────────────────────────────────────────────────────────
-# --cut-dirs=6 strips: ~brant / jades-dr5 / GOODS-S / hlsp / images / mosaics
 
 echo "--- GOODS-S mosaics ---"
-wget ${WGET_OPTS} --cut-dirs=6 \
-     -P "${MOSAIC_DIR}/GOODS-S" \
-     "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-S/hlsp/images/mosaics/"
+lftp_mirror \
+    "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-S/hlsp/images/mosaics/" \
+    "${MOSAIC_DIR}/GOODS-S"
 
 echo "--- GOODS-N mosaics ---"
-wget ${WGET_OPTS} --cut-dirs=6 \
-     -P "${MOSAIC_DIR}/GOODS-N" \
-     "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-N/hlsp/images/mosaics/"
+lftp_mirror \
+    "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-N/hlsp/images/mosaics/" \
+    "${MOSAIC_DIR}/GOODS-N"
 
 # ── PSFs ──────────────────────────────────────────────────────────────────────
-# PSFs live under .../images/submosaics/ organised in subregion subdirectories.
-# Filenames end with *mpsf.fits; only those are downloaded.
-# --cut-dirs=6 strips: ~brant / jades-dr5 / GOODS-S / hlsp / images / submosaics
-# Subregion subdirectories are preserved under psfs/GOODS-{S,N}/.
+# PSFs live under .../submosaics/ in subregion subdirectories.
+# Only *mpsf.fits files are downloaded; subregion structure is preserved.
 
-echo "--- GOODS-S PSFs (*mpsf.fits from submosaics) ---"
-wget ${WGET_OPTS} --cut-dirs=6 \
-     -A "*mpsf.fits" \
-     -P "${PSF_DIR}/GOODS-S" \
-     "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-S/hlsp/images/submosaics/"
+echo "--- GOODS-S PSFs (*mpsf.fits) ---"
+lftp_mirror \
+    "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-S/hlsp/images/submosaics/" \
+    "${PSF_DIR}/GOODS-S" \
+    "*mpsf.fits"
 
-echo "--- GOODS-N PSFs (*mpsf.fits from submosaics) ---"
-wget ${WGET_OPTS} --cut-dirs=6 \
-     -A "*mpsf.fits" \
-     -P "${PSF_DIR}/GOODS-N" \
-     "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-N/hlsp/images/submosaics/"
+echo "--- GOODS-N PSFs (*mpsf.fits) ---"
+lftp_mirror \
+    "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-N/hlsp/images/submosaics/" \
+    "${PSF_DIR}/GOODS-N" \
+    "*mpsf.fits"
 
 # ── Catalogs ──────────────────────────────────────────────────────────────────
-# --cut-dirs=5 strips: ~brant / jades-dr5 / GOODS-S / hlsp / catalogs
 
 echo "--- GOODS-S catalogs ---"
-wget ${WGET_OPTS} --cut-dirs=5 \
-     -P "${CAT_DIR}/GOODS-S" \
-     "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-S/hlsp/catalogs/"
+lftp_mirror \
+    "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-S/hlsp/catalogs/" \
+    "${CAT_DIR}/GOODS-S"
 
 echo "--- GOODS-N catalogs ---"
-wget ${WGET_OPTS} --cut-dirs=5 \
-     -P "${CAT_DIR}/GOODS-N" \
-     "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-N/hlsp/catalogs/"
+lftp_mirror \
+    "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-N/hlsp/catalogs/" \
+    "${CAT_DIR}/GOODS-N"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
