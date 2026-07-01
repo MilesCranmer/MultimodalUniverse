@@ -28,12 +28,12 @@
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=4G
 #SBATCH --time=24:00:00
-#SBATCH --output=/n03data/huertas/JADES/DR5/jades_dr5_download_%j.out
-#SBATCH --error=/n03data/huertas/JADES/DR5/jades_dr5_download_%j.err
+#SBATCH --output=/n23data1/huertas/jades/DR5/jades_dr5_download_%j.out
+#SBATCH --error=/n23data1/huertas/jades/DR5/jades_dr5_download_%j.err
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-BASE_DIR=/n03data/huertas/JADES/DR5
+BASE_DIR=/n23data1/huertas/jades/DR5
 MOSAIC_DIR=${BASE_DIR}/mosaics
 PSF_DIR=${BASE_DIR}/psfs
 CAT_DIR=${BASE_DIR}/cats
