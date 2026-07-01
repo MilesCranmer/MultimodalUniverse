@@ -38,39 +38,63 @@ MOSAIC_DIR=${BASE_DIR}/mosaics
 PSF_DIR=${BASE_DIR}/psfs
 CAT_DIR=${BASE_DIR}/cats
 
-# lftp is used instead of wget because wget -r loads the entire URL tree into
-# RAM before downloading, which exhausts memory on large JADES directory trees.
-# lftp mirror streams the listing and downloads concurrently with low overhead.
+# Python urllib is used for downloading: it needs no external tools (no lftp,
+# no wget -r) and streams file listings from the HTTP index page, so it never
+# loads the whole directory tree into memory.
 #
-# lftp mirror options:
-#   --only-newer   : skip files already present (resume-safe)
-#   --parallel=4   : 4 concurrent transfers per mirror call
-#   --verbose      : print each downloaded file
-#   --log=FILE     : per-section transfer log
+# Behaviour:
+#   - Skips files that already exist on disk (resume-safe).
+#   - Recurses into subdirectories (needed for PSF submosaics).
+#   - Optional fnmatch glob filters which files are downloaded.
 
-# ── Helper: mirror one remote URL into a local directory ──────────────────────
+# ── Helper: mirror one remote HTTP index URL into a local directory ───────────
 
-lftp_mirror() {
+http_mirror() {
     local remote_url="$1"
     local local_dir="$2"
     local include_glob="${3:-}"   # optional glob, e.g. "*mpsf.fits"
-    local log_file="${BASE_DIR}/lftp_$(basename ${local_dir}).log"
 
-    local include_opt=""
-    if [ -n "${include_glob}" ]; then
-        include_opt="--include-glob=${include_glob}"
-    fi
+    python3 - "${remote_url}" "${local_dir}" "${include_glob}" <<'PYEOF'
+import sys, re, urllib.request
+from pathlib import Path
+from fnmatch import fnmatch
 
-    lftp -c "
-set net:max-retries 5
-set net:reconnect-interval-base 10
-set ftp:passive-mode yes
-open ${remote_url%/*}/
-mirror --only-newer --parallel=4 --verbose ${include_opt} \
-       --log=${log_file} \
-       $(basename ${remote_url})/ ${local_dir}/
-bye
-"
+def mirror(url, local_dir, include_glob):
+    url = url.rstrip('/') + '/'
+    Path(local_dir).mkdir(parents=True, exist_ok=True)
+    print(f"Scanning {url}", flush=True)
+    try:
+        with urllib.request.urlopen(url) as r:
+            html = r.read().decode('utf-8', errors='replace')
+    except Exception as e:
+        print(f"  ERROR fetching {url}: {e}", flush=True)
+        return
+
+    hrefs = re.findall(r'href="([^"?#][^"]*)"', html)
+    for href in sorted(set(hrefs)):
+        if href.startswith(('/', '..', '?', 'http')):
+            continue
+        is_dir = href.endswith('/')
+        name = href.rstrip('/')
+        if not name:
+            continue
+        if is_dir:
+            mirror(url + name + '/', str(Path(local_dir) / name), include_glob)
+        else:
+            if include_glob and not fnmatch(name, include_glob):
+                continue
+            dest = Path(local_dir) / name
+            if dest.exists():
+                print(f"  skip  {name}", flush=True)
+                continue
+            print(f"  get   {name}", flush=True)
+            try:
+                urllib.request.urlretrieve(url + name, str(dest))
+            except Exception as e:
+                print(f"  ERROR {name}: {e}", flush=True)
+
+mirror(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "")
+PYEOF
 }
 
 # ── Create output directories ─────────────────────────────────────────────────
@@ -89,12 +113,12 @@ echo
 # ── Mosaics ───────────────────────────────────────────────────────────────────
 
 echo "--- GOODS-S mosaics ---"
-lftp_mirror \
+http_mirror \
     "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-S/hlsp/images/mosaics/" \
     "${MOSAIC_DIR}/GOODS-S"
 
 echo "--- GOODS-N mosaics ---"
-lftp_mirror \
+http_mirror \
     "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-N/hlsp/images/mosaics/" \
     "${MOSAIC_DIR}/GOODS-N"
 
@@ -103,13 +127,13 @@ lftp_mirror \
 # Only *mpsf.fits files are downloaded; subregion structure is preserved.
 
 echo "--- GOODS-S PSFs (*mpsf.fits) ---"
-lftp_mirror \
+http_mirror \
     "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-S/hlsp/images/submosaics/" \
     "${PSF_DIR}/GOODS-S" \
     "*mpsf.fits"
 
 echo "--- GOODS-N PSFs (*mpsf.fits) ---"
-lftp_mirror \
+http_mirror \
     "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-N/hlsp/images/submosaics/" \
     "${PSF_DIR}/GOODS-N" \
     "*mpsf.fits"
@@ -117,12 +141,12 @@ lftp_mirror \
 # ── Catalogs ──────────────────────────────────────────────────────────────────
 
 echo "--- GOODS-S catalogs ---"
-lftp_mirror \
+http_mirror \
     "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-S/hlsp/catalogs/" \
     "${CAT_DIR}/GOODS-S"
 
 echo "--- GOODS-N catalogs ---"
-lftp_mirror \
+http_mirror \
     "https://slate.ucsc.edu/~brant/jades-dr5/GOODS-N/hlsp/catalogs/" \
     "${CAT_DIR}/GOODS-N"
 
