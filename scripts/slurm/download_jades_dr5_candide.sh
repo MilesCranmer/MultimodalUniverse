@@ -88,10 +88,13 @@ def mirror(url, local_dir, include_glob):
                 print(f"  skip  {name}", flush=True)
                 continue
             print(f"  get   {name}", flush=True)
+            tmp = dest.with_suffix(dest.suffix + ".tmp")
             try:
-                urllib.request.urlretrieve(url + name, str(dest))
+                urllib.request.urlretrieve(url + name, str(tmp))
+                tmp.rename(dest)
             except Exception as e:
                 print(f"  ERROR {name}: {e}", flush=True)
+                tmp.unlink(missing_ok=True)
 
 mirror(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "")
 PYEOF
