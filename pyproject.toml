@@ -10,17 +10,58 @@ authors = [
 description = "Large Astronomical Dataset for Foundation Models"
 readme = "README.md"
 license = {text = "MIT"}
+requires-python = ">=3.11,<3.14"
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
-dynamic = ["dependencies", "version"]
+dependencies = [
+    # Core MMU runtime
+    "astropy",
+    "datasets",
+    "h5py",
+    "pandas",
+    "tqdm",
+    # HATS conversion + loading
+    "hats>=0.9.0",
+    "hats-import>=0.9.0",
+    "lsdb>=0.9.0",
+    "pyarrow",
+    "numpy",
+    "healpy",
+    "dask[distributed]",
+    "universal_pathlib",
+    # PyTorch loader (mmu.data depends on torch at module-import time)
+    "torch",
+    "desispec>=0.70.0",
+    # Orchestration: every cluster run goes through Snakemake. Not optional.
+    "snakemake",
+    "scikit-image>=0.26.0",
+    "pillow>=12.2.0",
+    "filelock>=3.25.2",
+    "snakemake-executor-plugin-slurm>=2.6.0",
+]
+dynamic = ["version"]
 
-[tool.setuptools.dynamic]
-dependencies = { file = "requirements.txt" }
-optional-dependencies = {bench = { file = ["bench-requirements.txt"] }}
+[project.optional-dependencies]
+bench = [
+    "torchvision",
+    "lightning",
+    "scikit-learn",
+    "spender",
+]
+viz = [
+    "matplotlib",
+]
+dev = [
+    "pytest",
+    "snakemake",
+]
 
 [tool.setuptools]
-packages = ["mmu"]
+packages = ["mmu", "mmu.benchmark", "mmu.benchmark.eval", "mmu.benchmark.models"]
 
 [tool.setuptools_scm]
 write_to = "mmu/_version.py"

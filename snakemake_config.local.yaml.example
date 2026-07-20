@@ -1,0 +1,11 @@
+# Personal Snakemake config — copy this to `snakemake_config.local.yaml`
+# (gitignored) and adjust as needed. Anything you set here overrides
+# the defaults in `snakemake_config.yaml` for your machine only.
+#
+# Example: point at a local scratch dir on your laptop.
+
+profile: test
+
+# Or override the profile values directly:
+# hats_root: /tmp/mmu_hats_dev
+# max_files: 1

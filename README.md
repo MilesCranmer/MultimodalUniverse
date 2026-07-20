@@ -53,6 +53,51 @@ dset = dset.with_format('numpy')
 example = next(iter(dset))
 ```
 
+## HATS Data Access (v2)
+
+MMU v2 stores all datasets as [HATS](https://hats.readthedocs.io/) catalogs (HEALPix-partitioned Parquet). This enables spatial cross-matching across surveys without downloading everything, and plugs directly into PyTorch for multimodal ML.
+
+```python
+from mmu.data import HATSDataset, mmu_collate
+from torch.utils.data import DataLoader
+
+HATS = "path/to/MultimodalUniverse_v2_hats"
+
+galaxies = HATSDataset(f"{HATS}/desi_provabgs/desi_provabgs/desi_provabgs")
+supernovae = HATSDataset(f"{HATS}/snls/snls/snls")
+
+matched = galaxies.crossmatch(supernovae, radius_arcsec=10.0,
+                               suffixes=("_host", "_sn"))
+
+train = DataLoader(matched, batch_size=8, shuffle=True, collate_fn=mmu_collate)
+
+for batch in train:
+    stellar_mass = batch["PROVABGS_LOGMSTAR_BF_host"]   # tensor [8]
+    redshift     = batch["Z_HP_host"]                    # tensor [8]
+    lightcurve   = batch["lightcurve_sn"]                # {band, time, flux, flux_err}
+    separation   = batch["_dist_arcsec"]                 # tensor [8]
+```
+
+Crossmatches are chainable for N-way joins:
+
+```python
+step1 = galaxies.crossmatch(supernovae, radius_arcsec=10.0,
+                             suffixes=("_galaxy", "_sn"))
+step2 = step1.crossmatch(images, radius_arcsec=5.0,
+                          suffixes=("", "_img"))
+```
+
+Or use [LSDB](https://lsdb.readthedocs.io/) directly for lazy dask-backed queries:
+
+```python
+import lsdb
+
+desi = lsdb.read_hats(f"{HATS}/desi/desi")
+gaia = lsdb.read_hats(f"{HATS}/gaia_xp/gaia_xp")
+
+df = desi.crossmatch(gaia, radius_arcsec=1.0).compute()
+```
+
 ## Datasets
 The Multimodal Universe currently contains data from the following surveys/modalities:
 | **Survey**             | **Modality**        | **Science Use Case** | **# samples** |

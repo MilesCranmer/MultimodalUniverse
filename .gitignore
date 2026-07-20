@@ -27,6 +27,9 @@ share/python-wheels/
 .DS_Store
 data/.DS_Store
 
+# Claude Code local settings (may contain private paths, permissions, etc.)
+.claude/
+
 MANIFEST
 
 # PyInstaller
@@ -195,3 +198,12 @@ scripts/kepler/figs
 *.h5
 
 slurm*.out
+test_data/
+.venv/
+snakemake_config.local.yaml
+test_output/
+.snakemake/
+
+# Playwright MCP scratch (DOM accessibility dumps + browser console logs
+# captured when Claude browses docs — noise, not source).
+.playwright-mcp/

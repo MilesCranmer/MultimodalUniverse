@@ -1,0 +1,407 @@
+"""Visualisation helpers for COSMOS-Web MMU cutouts.
+
+Band order in the (5, H, W) image.flux array:
+    0  F115W  NIRCam 30 mas
+    1  F150W  NIRCam 30 mas
+    2  F277W  NIRCam 30 mas  ← selection band
+    3  F444W  NIRCam 30 mas
+    4  F770W  MIRI   60 mas
+
+Quick-start (notebook)::
+
+    import lsdb
+    cat = lsdb.read_hats("/n03data/huertas/mmu/cosmos/cosmos/cosmos")
+    df  = cat.head(64).compute()  # pandas DataFrame with nested image struct
+
+    from scripts.cosmos.validation.viusalize import plot_all_modalities
+    plot_all_modalities(df, max_plots=25, save=True, save_dir="/tmp/cosmos_vis")
+"""
+
+from __future__ import annotations
+
+import math
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+from astropy.visualization import AsinhStretch, ImageNormalize, PercentileInterval, make_lupton_rgb
+
+
+COSMOS_BANDS = ["F115W", "F150W", "F277W", "F444W", "F770W"]
+BAND_INDEX = {b: i for i, b in enumerate(COSMOS_BANDS)}
+
+# Default single-band display
+DEFAULT_GRAY_BAND = "F277W"
+
+# RGB composite channels
+RGB_R = "F444W"
+RGB_G = "F277W"
+RGB_B = "F115W"
+
+
+# ---------------------------------------------------------------------------
+# Generic grid utilities
+# ---------------------------------------------------------------------------
+
+
+def compute_grid_shape(n_items: int, max_plots: int = 64) -> tuple[int, int, int]:
+    """Return (n_select, nrows, ncols) for a near-square capped grid."""
+    if n_items < 0:
+        raise ValueError("n_items must be non-negative.")
+    n_select = min(int(n_items), int(max_plots))
+    if n_select == 0:
+        return 0, 0, 0
+    ncols = int(math.ceil(math.sqrt(n_select)))
+    nrows = int(math.ceil(n_select / ncols))
+    return n_select, nrows, ncols
+
+
+def flatten_axes(axs) -> np.ndarray:
+    """Return axes as a 1D NumPy array regardless of original shape."""
+    if isinstance(axs, np.ndarray):
+        return axs.flatten()
+    return np.array([axs])
+
+
+def hide_unused_axes(axs, used_count: int) -> None:
+    for ax in flatten_axes(axs)[int(used_count):]:
+        ax.axis("off")
+
+
+def _safe_object_id(row, object_id_col: str):
+    try:
+        return row[object_id_col]
+    except Exception:
+        return "unknown"
+
+
+def _make_grid_axes_for_n(n_items: int, max_plots: int = 64, figsize_scale: float = 2.6):
+    n_select, nrows, ncols = compute_grid_shape(n_items=n_items, max_plots=max_plots)
+    if n_select == 0:
+        raise ValueError("No rows available to plot.")
+    fig, axs = plt.subplots(nrows, ncols, figsize=(ncols * figsize_scale, nrows * figsize_scale))
+    return fig, axs, n_select
+
+
+# ---------------------------------------------------------------------------
+# Low-level rendering primitives
+# ---------------------------------------------------------------------------
+
+
+def _render_grayscale(ax, image_2d: np.ndarray, title=None, fontsize: int = 8) -> None:
+    ax.imshow(
+        image_2d,
+        cmap="gray",
+        origin="lower",
+        norm=ImageNormalize(image_2d, interval=PercentileInterval(99.5), stretch=AsinhStretch()),
+    )
+    if title is not None:
+        ax.set_title(str(title), fontsize=fontsize)
+    ax.axis("off")
+
+
+def _render_rgb(ax, r: np.ndarray, g: np.ndarray, b: np.ndarray, title=None, fontsize: int = 8) -> None:
+    """Lupton RGB composite."""
+    rgb = make_lupton_rgb(r, g, b, interval=PercentileInterval(99.5), stretch=5, Q=8)
+    ax.imshow(rgb, origin="lower")
+    if title is not None:
+        ax.set_title(str(title), fontsize=fontsize)
+    ax.axis("off")
+
+
+def _extract_band(image_flux_row, band_index: int) -> np.ndarray:
+    """Extract one 2D plane from a (5, H, W) image_flux row."""
+    if image_flux_row is None or isinstance(image_flux_row, np.ma.core.MaskedConstant):
+        raise ValueError("Missing image_flux row (masked or None).")
+    arr = np.asarray(image_flux_row)
+    if arr.ndim == 3:
+        if not (0 <= band_index < arr.shape[0]):
+            raise ValueError(f"band_index {band_index} out of range for shape {arr.shape}.")
+        return arr[band_index]
+    if arr.ndim == 2:
+        return arr
+    raise ValueError(f"Expected 2D or 3D image array, got shape {arr.shape}.")
+
+
+def _extract_rgb_channels(image_flux_row) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return (R, G, B) = (F444W, F277W, F115W) planes from a row."""
+    if image_flux_row is None or isinstance(image_flux_row, np.ma.core.MaskedConstant):
+        raise ValueError("Missing image_flux row (masked or None).")
+    arr = np.asarray(image_flux_row)
+    if arr.ndim != 3 or arr.shape[0] < 5:
+        raise ValueError(f"Expected image_flux shape (5, H, W), got {arr.shape}.")
+    return arr[BAND_INDEX[RGB_R]], arr[BAND_INDEX[RGB_G]], arr[BAND_INDEX[RGB_B]]
+
+
+# ---------------------------------------------------------------------------
+# Per-band grayscale grid
+# ---------------------------------------------------------------------------
+
+
+def plot_band_from_df(
+    df,
+    fig,
+    axs,
+    image_col: str = "image_flux",
+    object_id_col: str = "object_id",
+    band: str = DEFAULT_GRAY_BAND,
+    max_plots: int = 64,
+) -> tuple:
+    """Plot grayscale cutouts for one band from dataframe rows into caller-provided axes.
+
+    Args:
+        band: One of COSMOS_BANDS (default F277W).
+    """
+    band_index = BAND_INDEX[band]
+    n_select = min(len(df), int(max_plots))
+    axes = flatten_axes(axs)
+    if len(axes) < n_select:
+        raise ValueError(f"Not enough axes: need {n_select}, got {len(axes)}.")
+    for i in range(n_select):
+        row = df.iloc[i] if hasattr(df, "iloc") else df[i]
+        obj_id = _safe_object_id(row, object_id_col)
+        image_2d = _extract_band(row[image_col], band_index)
+        _render_grayscale(axes[i], image_2d, title=obj_id)
+    hide_unused_axes(axs, n_select)
+    return fig, axs
+
+
+# ---------------------------------------------------------------------------
+# RGB composite grid
+# ---------------------------------------------------------------------------
+
+
+def plot_rgb_from_df(
+    df,
+    fig,
+    axs,
+    image_col: str = "image_flux",
+    object_id_col: str = "object_id",
+    max_plots: int = 64,
+) -> tuple:
+    """Plot F444W/F277W/F115W RGB composites from dataframe rows."""
+    n_select = min(len(df), int(max_plots))
+    axes = flatten_axes(axs)
+    if len(axes) < n_select:
+        raise ValueError(f"Not enough axes: need {n_select}, got {len(axes)}.")
+    for i in range(n_select):
+        row = df.iloc[i] if hasattr(df, "iloc") else df[i]
+        obj_id = _safe_object_id(row, object_id_col)
+        r, g, b = _extract_rgb_channels(row[image_col])
+        _render_rgb(axes[i], r, g, b, title=obj_id)
+    hide_unused_axes(axs, n_select)
+    return fig, axs
+
+
+# ---------------------------------------------------------------------------
+# 5-band strip: one row per object, 5 columns for F115W–F770W
+# ---------------------------------------------------------------------------
+
+
+def _draw_strip(rows: list, image_col: str, object_id_col: str, sort_by: str | None, figsize_scale: float, title: str):
+    """Create one multiband strip figure from a pre-selected list of rows."""
+    n = len(rows)
+    n_bands = len(COSMOS_BANDS)
+    fig, axs = plt.subplots(n, n_bands, figsize=(n_bands * figsize_scale, n * figsize_scale))
+    axs = np.atleast_2d(axs)
+    for row_idx, row in enumerate(rows):
+        obj_id = _safe_object_id(row, object_id_col)
+        arr = row[image_col]
+        label = str(obj_id)
+        if sort_by is not None:
+            mag_val = row.get(sort_by) if isinstance(row, dict) else getattr(row, sort_by, None)
+            if mag_val is not None:
+                col_short = sort_by.replace("MAG_MODEL_", "")
+                label = f"{obj_id}\n{col_short}={float(mag_val):.2f}"
+        for col_idx, band in enumerate(COSMOS_BANDS):
+            ax = axs[row_idx, col_idx]
+            try:
+                plane = _extract_band(arr, BAND_INDEX[band])
+                _render_grayscale(ax, plane)
+            except Exception:
+                ax.axis("off")
+            if row_idx == 0:
+                ax.set_title(band, fontsize=9)
+            if col_idx == 0:
+                ax.text(-0.05, 0.5, label, transform=ax.transAxes, fontsize=7, ha="right", va="center")
+    fig.suptitle(title, fontsize=11)
+    fig.tight_layout()
+    return fig, axs
+
+
+def plot_multiband_strip(
+    df,
+    image_col: str = "image_flux",
+    object_id_col: str = "object_id",
+    sort_by: str | None = "MAG_MODEL_F277W",
+    n_objects: int = 8,
+    faint_page: bool = True,
+    figsize_scale: float = 2.0,
+    show: bool = True,
+    save: bool = False,
+    save_dir: str | Path | None = None,
+    dpi: int = 180,
+) -> tuple:
+    """Plot multiband strips sorted by magnitude, with optional faint-end page.
+
+    Args:
+        sort_by: Column to sort by ascending (brightest = smallest value first).
+            Pass None to keep original order.
+        n_objects: Rows per page.
+        faint_page: If True, also produce a second figure with the faintest
+            n_objects rows (saved as multiband_strip_faint.png).
+    """
+    rows = list(df.iloc[:] if hasattr(df, "iloc") else df)
+
+    if sort_by is not None:
+        try:
+            rows = sorted(rows, key=lambda r: (r[sort_by] is None, r[sort_by]))
+        except (KeyError, TypeError):
+            pass
+
+    n = min(len(rows), n_objects)
+    sort_label = sort_by or "original order"
+
+    fig_bright, axs_bright = _draw_strip(
+        rows[:n], image_col, object_id_col, sort_by, figsize_scale,
+        title=f"COSMOS-Web — bright end, sorted by {sort_label} (n={n})",
+    )
+
+    fig_faint, axs_faint = None, None
+    if faint_page and len(rows) >= n:
+        faint_rows = rows[max(0, len(rows) - n):]
+        fig_faint, axs_faint = _draw_strip(
+            faint_rows, image_col, object_id_col, sort_by, figsize_scale,
+            title=f"COSMOS-Web — faint end, sorted by {sort_label} (n={len(faint_rows)})",
+        )
+
+    if save:
+        if save_dir is None:
+            raise ValueError("save_dir must be provided when save=True.")
+        path = Path(save_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        fig_bright.savefig(path / "multiband_strip_bright.png", dpi=dpi, bbox_inches="tight")
+        if fig_faint is not None:
+            fig_faint.savefig(path / "multiband_strip_faint.png", dpi=dpi, bbox_inches="tight")
+
+    if show:
+        plt.show()
+    return (fig_bright, axs_bright, fig_faint, axs_faint)
+
+
+# ---------------------------------------------------------------------------
+# Per-magnitude-bin strips
+# ---------------------------------------------------------------------------
+
+
+def plot_multiband_mag_bins(
+    df,
+    image_col: str = "image_flux",
+    object_id_col: str = "object_id",
+    mag_col: str = "MAG_MODEL_F277W",
+    mag_bins: list | None = None,
+    n_per_bin: int = 5,
+    figsize_scale: float = 2.0,
+    show: bool = True,
+    save: bool = False,
+    save_dir: str | Path | None = None,
+    dpi: int = 180,
+) -> list:
+    """Produce one multiband strip figure per magnitude bin.
+
+    Args:
+        mag_bins: List of (lo, hi) tuples. Defaults to 1-mag bins from 20 to 27.
+        n_per_bin: Max objects to show per bin (brightest within bin first).
+        mag_col: Column used for binning and labelling.
+
+    Returns:
+        List of (lo, hi, fig, axs) for each non-empty bin.
+    """
+    if mag_bins is None:
+        mag_bins = [(lo, lo + 1) for lo in range(20, 27)]
+
+    rows = list(df.iloc[:] if hasattr(df, "iloc") else df)
+    col_short = mag_col.replace("MAG_MODEL_", "")
+
+    save_path = None
+    if save:
+        if save_dir is None:
+            raise ValueError("save_dir must be provided when save=True.")
+        save_path = Path(save_dir)
+        save_path.mkdir(parents=True, exist_ok=True)
+
+    results = []
+    for lo, hi in mag_bins:
+        bin_rows = [
+            r for r in rows
+            if (r.get(mag_col) if isinstance(r, dict) else getattr(r, mag_col, None)) is not None
+            and lo <= (r[mag_col] if isinstance(r, dict) else getattr(r, mag_col)) < hi
+        ]
+        bin_rows.sort(key=lambda r: r[mag_col] if isinstance(r, dict) else getattr(r, mag_col))
+        bin_rows = bin_rows[:n_per_bin]
+
+        if not bin_rows:
+            print(f"  [{lo}, {hi}): no objects in pool — skipping")
+            continue
+
+        fig, axs = _draw_strip(
+            bin_rows, image_col, object_id_col, mag_col, figsize_scale,
+            title=f"COSMOS-Web — {col_short} in [{lo}, {hi})  (n={len(bin_rows)})",
+        )
+        results.append((lo, hi, fig, axs))
+
+        if save_path is not None:
+            fname = f"multiband_strip_{col_short}_{lo:04.1f}_{hi:04.1f}.png".replace(".", "p")
+            fig.savefig(save_path / fname, dpi=dpi, bbox_inches="tight")
+            print(f"  [{lo}, {hi}): wrote {save_path / fname}")
+
+    if show:
+        plt.show()
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Combined visualisation
+# ---------------------------------------------------------------------------
+
+
+def plot_all_modalities(
+    df,
+    max_plots: int = 64,
+    object_id_col: str = "object_id",
+    show: bool = True,
+    save: bool = False,
+    save_dir: str | Path | None = None,
+    dpi: int = 180,
+) -> dict:
+    """Plot grayscale (F277W) and RGB (F444W/F277W/F115W) grids.
+
+    Returns a dict with keys 'gray' and 'rgb', each mapping to (fig, axs).
+    """
+    out = {}
+    save_path = None
+    if save:
+        if save_dir is None:
+            raise ValueError("save_dir must be provided when save=True.")
+        save_path = Path(save_dir)
+        save_path.mkdir(parents=True, exist_ok=True)
+
+    # Grayscale (F277W)
+    fig_g, axs_g, n_g = _make_grid_axes_for_n(len(df), max_plots=max_plots)
+    plot_band_from_df(df=df, fig=fig_g, axs=axs_g, object_id_col=object_id_col, band=DEFAULT_GRAY_BAND, max_plots=max_plots)
+    fig_g.suptitle(f"{DEFAULT_GRAY_BAND} cutouts (showing {n_g}/{len(df)})")
+    out["gray"] = (fig_g, axs_g)
+    if save_path is not None:
+        fig_g.savefig(save_path / f"{DEFAULT_GRAY_BAND.lower()}_cutouts.png", dpi=dpi, bbox_inches="tight", pad_inches=0.05)
+
+    # RGB
+    fig_r, axs_r, n_r = _make_grid_axes_for_n(len(df), max_plots=max_plots)
+    plot_rgb_from_df(df=df, fig=fig_r, axs=axs_r, object_id_col=object_id_col, max_plots=max_plots)
+    fig_r.suptitle(f"RGB ({RGB_R}/{RGB_G}/{RGB_B}) cutouts (showing {n_r}/{len(df)})")
+    out["rgb"] = (fig_r, axs_r)
+    if save_path is not None:
+        fig_r.savefig(save_path / "rgb_cutouts.png", dpi=dpi, bbox_inches="tight", pad_inches=0.05)
+
+    if show:
+        plt.show()
+    return out

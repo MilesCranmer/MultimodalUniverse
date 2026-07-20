@@ -1,0 +1,51 @@
+# Snakemake config for the raw -> HATS pipeline.
+#
+# IMPORTANT: every profile here assumes you are on the Flatiron cluster, where
+# the raw survey inputs live under /mnt/ceph/users/polymathic/external_data/astro.
+# Neither the build scripts nor Snakemake download anything; the `test` profile
+# is just a small subset of the cluster build, NOT a hermetic local test.
+#
+# For local development (laptop / CI), use the unit tests in `tests/` — they
+# build synthetic in-memory data and don't touch real raw inputs.
+#
+# Pick a profile with `--config profile=NAME`. Defaults to `cluster`.
+#
+#   uv run snakemake --cores 4 build_allwise                       # cluster, full
+#   uv run snakemake --cores 1 build_allwise --config profile=test # cluster, 1 shard
+#
+# To override paths on your own machine without committing them, drop a
+# `snakemake_config.local.yaml` next to this file (gitignored). It is loaded
+# AFTER this file and overrides any keys it sets.
+
+profile: cluster
+
+profiles:
+  cluster:
+    # Production: write to the shared polymathic ceph mount, build every shard.
+    hats_root: /mnt/ceph/users/polymathic/MultimodalUniverse_v2_hats
+    max_files: null
+    ra_center: null
+    dec_center: null
+    radius: null
+
+  cosmos:
+    # 1° COSMOS-field test slice. Every build script filters its input catalog
+    # (or file list) to (ra, dec) within 0.5° of (150, +2) before processing.
+    # Finishes in seconds to minutes per dataset instead of the hours/days a
+    # full build takes. Used for end-to-end validation of the schema + pipeline
+    # for every MMU dataset against a consistent multi-survey sky region.
+    hats_root: /mnt/ceph/users/polymathic/MultimodalUniverse_v2_hats_cosmos
+    max_files: null
+    ra_center: 150.0
+    dec_center: 2.0
+    radius: 0.5
+
+  test:
+    # Smoke test: one shard per dataset, write under the repo so it's easy to
+    # inspect / clean up. Still needs the raw inputs to exist on disk
+    # (i.e. you need to be on the cluster, or have local mirrors).
+    hats_root: ./test_output/hats
+    max_files: 1
+    ra_center: null
+    dec_center: null
+    radius: null
